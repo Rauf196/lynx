@@ -19,3 +19,6 @@ Thumbs.db
 # Environment files
 .env
 .env.local
+
+# Ptactise files (trying before implementing)
+practise/
