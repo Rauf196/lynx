@@ -1,14 +1,17 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::SocketAddr;
+
 use lynx_protocol::{decode_frame, encode_response};
+
+use lynx_server::server_addr;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    let address = "127.0.0.1:6006";
+    let address = server_addr();
 
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(&address).await?;
     println!("Server listening on {}", address);
 
     // accept loop

@@ -1,15 +1,18 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use lynx_protocol::{Message, Response, encode_frame, decode_response};
+
+use lynx_protocol::{encode_frame, decode_response};
+
+use lynx_server::server_addr;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // connect to server
-    let mut socket = TcpStream::connect("127.0.0.1:6006").await?;
+    let mut socket = TcpStream::connect(server_addr()).await?;
     println!("Connected to server");
 
     // send a Connect Message
-    let msg = Message::Connect {
+    let msg = lynx_protocol::Message::Connect {
         username: "Rauf".to_string(),
     };
     let frame = encode_frame(&msg)?;
