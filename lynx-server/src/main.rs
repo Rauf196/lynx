@@ -6,6 +6,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use lynx_protocol::{Message, Response, decode_frame, encode_response};
 use lynx_server::server_addr;
+use anyhow::Result;
 
 type ClientSender = mpsc::Sender<Response>;
 type Clients = Arc<DashMap<String, ClientSender>>;
@@ -36,44 +37,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_client(mut socket: TcpStream, addr: SocketAddr, clients: Clients) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) -> Result<(), Box<dyn std::error::Error>> {
     println!("Handling client: {}", addr);
 
     let mut buffer = vec![0u8; 4096];
 
-    let (tx, _rx) = mpsc::channel::<Response>(100); // 100 = buffer size, rx will be used for write task
+    let (tx, mut rx) = mpsc::channel::<Response>(100); // 100 = buffer size, rx will be used for write task
 
-    loop {
+    let (mut read_half, mut write_half) = socket.into_split();
+
+    // spawn write task
+    let write_task = tokio::spawn(async move {
+        while let Some(response) = rx.recv().await {
+            let frame = encode_response(&response).map_err(|e| anyhow::anyhow!(e))?;
+            write_half.write_all(&frame).await?;
+        }
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    // spawn read task
+    let read_task = tokio::spawn(async move {
+
+        let mut current_username: Option<String> = None;
+
+        loop {
         // read message
-        let num_bytes = socket.read(&mut buffer).await?;
+        let num_bytes = read_half.read(&mut buffer).await?;
 
         if num_bytes == 0 {
-            println!("Client {} disconnected", addr);
+            if let Some(username) = current_username {
+                clients.remove(&username);
+                println!("client {} (user: {}) disconnected", addr, username);
+            } else {
+                println!("client {} disconnected (not registered)", addr);
+            }
             break;
         }
 
-        let message = decode_frame(&buffer[0..num_bytes])?;
+        let message = decode_frame(&buffer[0..num_bytes]).map_err(|e| anyhow::anyhow!(e))?;
         println!("Message from {} - {:?}", addr, message);
 
         match message {
             Message::Connect { username } => {
                 // check if username is taken
                 if clients.contains_key(&username) {
+                    println!("user {} already exists", username);
                     let response = Response::Error {
                         message: "username already taken".to_string()
                     };
-                    let frame = encode_response(&response)?;
-                    socket.write_all(&frame).await?;
+                    tx.send(response).await?;
                 } else {
                     // register client
                     clients.insert(username.clone(), tx.clone());
+                    current_username = Some(username.clone());
                     println!("user {} registered", username);
 
                     let response = Response::Success {
                         message: format!("welcome, {}!", username)
                     };
-                    let frame = encode_response(&response)?;
-                    socket.write_all(&frame).await?;
+                    tx.send(response).await?;
+                }
+            }
+
+            Message::SendRoomMessage { text } => {
+
+                if let Some(ref sender_username) = current_username {
+                    // go through all the clients' senders
+                    for entry in clients.iter() {
+                        let client_tx = entry.value();
+
+                        // send to each client
+                        let msg = Response::IncomingMessage {
+                            from: sender_username.clone(),
+                            text: text.clone(),
+                            room: Some("default".to_string()),
+                        };
+
+                        let _ = client_tx.send(msg).await;
+                    }
+                } else {
+                    // user not registered - send error
+                    let response = Response::Error {
+                        message: "you must connect with a username first".to_string()
+                    };
+                    tx.send(response).await?;
                 }
             }
 
@@ -82,11 +130,15 @@ async fn handle_client(mut socket: TcpStream, addr: SocketAddr, clients: Clients
                 let response = Response::Success {
                     message: "message received".to_string()
                 };
-                let frame = encode_response(&response)?;
-                socket.write_all(&frame).await?;
+                tx.send(response).await?;
             }
         }
     }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    // wait for both tasks
+    tokio::try_join!(read_task, write_task)?;
 
     Ok(())
 }
