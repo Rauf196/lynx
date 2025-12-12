@@ -101,7 +101,6 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
             }
 
             Message::SendRoomMessage { text } => {
-
                 if let Some(ref sender_username) = current_username {
                     // go through all the clients' senders
                     for entry in clients.iter() {
@@ -116,6 +115,22 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
 
                         let _ = client_tx.send(msg).await;
                     }
+                } else {
+                    // user not registered - send error
+                    let response = Response::Error {
+                        message: "you must connect with a username first".to_string()
+                    };
+                    tx.send(response).await?;
+                }
+            }
+
+            Message::ListUsers => {
+                if current_username.is_some() {
+                    let users: Vec<String> = clients.iter()
+                        .map(|entry| entry.key().clone())
+                        .collect();
+                    let response = Response::UserList { users };
+                    tx.send(response).await?;
                 } else {
                     // user not registered - send error
                     let response = Response::Error {

@@ -64,7 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     println!("[DM] {}: {}", from, text);
                                 }
+                            },
+
+                            Response::UserList { users } => {
+                                println!("online users: {}", users.join(", "));
                             }
+
                             _ => println!("{:?}", response),
                         }
                     }
@@ -96,8 +101,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
 
-                    // Send as room message
-                    let msg = Message::SendRoomMessage { text };
+                    // parse input: command or regular message
+                    let msg = if text.starts_with("/") {
+                        match text.as_str() {
+                            "/users" => Message::ListUsers,
+                            _ => {
+                                println!("unknown command: {}", text);
+                                continue;
+                            }
+                        }
+                    } else {
+                        Message::SendRoomMessage { text }
+                    };
+
+                    // encode and send
                     if let Ok(frame) = encode_frame(&msg) {
                         if write_half.write_all(&frame).await.is_err() {
                             break;
