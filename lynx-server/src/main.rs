@@ -140,6 +140,34 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                 }
             }
 
+            Message::SendPrivateMessage { to, text } => {
+                if let Some(ref sender_username) = current_username {
+                    if let Some(recipient) = clients.get(&to) {
+                        let client_tx = recipient.value();
+
+                        let msg = Response::IncomingMessage {
+                            from: sender_username.clone(),
+                            text: text.clone(),
+                            room: None,
+                        };
+
+                        let _ = client_tx.send(msg).await;
+                    } else {
+                        // recipient not registered - send error
+                        let response = Response::Error {
+                            message: "recipient with that username could not be found".to_string()
+                        };
+                        tx.send(response).await?;
+                    }
+                } else {
+                    // user not registered - send error
+                    let response = Response::Error {
+                        message: "you must connect with a username first".to_string()
+                    };
+                    tx.send(response).await?;
+                }
+            }
+
             _ => {
                 // for now acknowledge other messages
                 let response = Response::Success {

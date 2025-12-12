@@ -68,6 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             Response::UserList { users } => {
                                 println!("online users: {}", users.join(", "));
+                            },
+
+                            Response::Error { message } => {
+                                println!("error: {}", message);
                             }
 
                             _ => println!("{:?}", response),
@@ -103,11 +107,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // parse input: command or regular message
                     let msg = if text.starts_with("/") {
-                        match text.as_str() {
-                            "/users" => Message::ListUsers,
-                            _ => {
-                                println!("unknown command: {}", text);
+
+                        if text.starts_with("/quit") {
+                            break;
+                        }
+
+                        if text.starts_with("/msg ") {
+                            let parts: Vec<&str> = text.splitn(3, ' ').collect();
+
+                            if parts.len() < 3 {
+                                println!("usage: /msg <name> <message>");
                                 continue;
+                            }
+
+                            let to = parts[1].to_string();
+                            let text = parts[2].to_string();
+
+                            Message::SendPrivateMessage{ to, text }
+                        } else {
+                            match text.as_str() {
+                                "/users" => Message::ListUsers,
+                                _ => {
+                                    println!("unknown command: {}", text);
+                                    continue;
+                                }
                             }
                         }
                     } else {
