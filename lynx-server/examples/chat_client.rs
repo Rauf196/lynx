@@ -74,6 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("error: {}", message);
                             }
 
+                            Response::Success { message } => {
+                                println!("{}", message);
+                            }
+
                             _ => println!("{:?}", response),
                         }
                     }
@@ -107,30 +111,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // parse input: command or regular message
                     let msg = if text.starts_with("/") {
+                        // split into command and rest
+                        let parts: Vec<&str> = text.splitn(2, ' ').collect();
+                        let command = parts[0];
+                        let args = parts.get(1).copied(); // Option<&str>
 
-                        if text.starts_with("/quit") {
-                            break;
-                        }
+                        match command {
+                            "/quit" | "/q" => break,
 
-                        if text.starts_with("/msg ") {
-                            let parts: Vec<&str> = text.splitn(3, ' ').collect();
+                            "/users" => Message::ListUsers,
 
-                            if parts.len() < 3 {
-                                println!("usage: /msg <name> <message>");
-                                continue;
-                            }
-
-                            let to = parts[1].to_string();
-                            let text = parts[2].to_string();
-
-                            Message::SendPrivateMessage{ to, text }
-                        } else {
-                            match text.as_str() {
-                                "/users" => Message::ListUsers,
-                                _ => {
-                                    println!("unknown command: {}", text);
+                            "/join" => {
+                                if let Some(room_name) = args {
+                                    Message::JoinRoom { room_name: room_name.to_string() }
+                                } else {
+                                    println!("usage: /join <room>");
                                     continue;
                                 }
+                            }
+
+                            "/msg" => {
+                                if let Some(rest) = args {
+                                    let msg_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                                    if msg_parts.len() < 2 {
+                                        println!("usage: /msg <name> <message>");
+                                        continue;
+                                    }
+                                    Message::SendPrivateMessage {
+                                        to: msg_parts[0].to_string(),
+                                        text: msg_parts[1].to_string(),
+                                    }
+                                } else {
+                                    println!("usage: /msg <name> <message>");
+                                    continue;
+                                }
+                            }
+
+                            _ => {
+                                println!("unknown command: {}", command);
+                                continue;
                             }
                         }
                     } else {

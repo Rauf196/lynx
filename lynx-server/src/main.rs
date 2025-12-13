@@ -9,7 +9,13 @@ use lynx_server::server_addr;
 use anyhow::Result;
 
 type ClientSender = mpsc::Sender<Response>;
-type Clients = Arc<DashMap<String, ClientSender>>;
+
+struct ClientInfo {
+    sender: ClientSender,
+    room: String,
+}
+
+type Clients = Arc<DashMap<String, ClientInfo>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,7 +95,10 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                     tx.send(response).await?;
                 } else {
                     // register client
-                    clients.insert(username.clone(), tx.clone());
+                    clients.insert(username.clone(), ClientInfo {
+                        sender: tx.clone(),
+                        room: "general".to_string(),
+                    });
                     current_username = Some(username.clone());
                     println!("user {} registered", username);
 
@@ -102,18 +111,21 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
 
             Message::SendRoomMessage { text } => {
                 if let Some(ref sender_username) = current_username {
-                    // go through all the clients' senders
+                    // get sender's room
+                    let sender_room = clients.get(sender_username)
+                        .map(|entry| entry.room.clone())
+                        .unwrap_or_else(|| "general".to_string());
+
+                    // go through all the clients' senders for {sender_room}
                     for entry in clients.iter() {
-                        let client_tx = entry.value();
-
-                        // send to each client
-                        let msg = Response::IncomingMessage {
-                            from: sender_username.clone(),
-                            text: text.clone(),
-                            room: Some("default".to_string()),
-                        };
-
-                        let _ = client_tx.send(msg).await;
+                        if entry.room == sender_room {
+                            let msg = Response::IncomingMessage {
+                                from: sender_username.clone(),
+                                text: text.clone(),
+                                room: Some(sender_room.clone()),
+                            };
+                            let _ = entry.sender.send(msg).await;
+                        }
                     }
                 } else {
                     // user not registered - send error
@@ -151,7 +163,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                             room: None,
                         };
 
-                        let _ = client_tx.send(msg).await;
+                        let _ = client_tx.sender.send(msg).await;
                     } else {
                         // recipient not registered - send error
                         let response = Response::Error {
@@ -159,6 +171,25 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                         };
                         tx.send(response).await?;
                     }
+                } else {
+                    // user not registered - send error
+                    let response = Response::Error {
+                        message: "you must connect with a username first".to_string()
+                    };
+                    tx.send(response).await?;
+                }
+            }
+
+            Message::JoinRoom { room_name } => {
+                if let Some(ref username) = current_username {
+                    if let Some(mut entry) = clients.get_mut(username) {
+                        entry.room = room_name.clone();
+                    }
+
+                    let response = Response::Success {
+                        message: format!("joined room : {}", room_name)
+                    };
+                    tx.send(response).await?;
                 } else {
                     // user not registered - send error
                     let response = Response::Error {
