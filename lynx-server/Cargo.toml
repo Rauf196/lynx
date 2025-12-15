@@ -7,5 +7,7 @@ edition.workspace = true
 tokio = { workspace = true }
 dashmap = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 lynx-protocol = { path = "../lynx-protocol" }

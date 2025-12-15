@@ -7,6 +7,8 @@ use dashmap::DashMap;
 use lynx_protocol::{Message, Response, decode_frame, encode_response};
 use lynx_server::server_addr;
 use anyhow::Result;
+use tracing::{info, warn, error, debug, instrument};
+use tracing_subscriber::EnvFilter;
 
 type ClientSender = mpsc::Sender<Response>;
 
@@ -19,32 +21,58 @@ type Clients = Arc<DashMap<String, ClientInfo>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing subscriber
+    // RUST_LOG env var controls log level (e.g., RUST_LOG=debug, RUST_LOG=lynx_server=debug)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info"))
+        )
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
 
     let address = server_addr();
 
-    let listener = TcpListener::bind(&address).await?;
-    println!("Server listening on {}", address);
+    let listener = match TcpListener::bind(&address).await {
+        Ok(l) => {
+            info!(address = %address, "server started");
+            l
+        }
+        Err(e) => {
+            error!(address = %address, error = %e, "failed to bind to address");
+            return Err(e.into());
+        }
+    };
 
     let clients: Clients = Arc::new(DashMap::new());
 
     // accept loop
     loop {
-        // socket is TcpStream , addr is their IP address
-        let (socket, addr) = listener.accept().await?;
-        println!("New connection from {}", addr);
+        let (socket, addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!(error = %e, "failed to accept connection");
+                continue;
+            }
+        };
+        info!(client_addr = %addr, "new connection");
 
-        let clients = clients.clone(); // Arc, not the dashmap
+        let clients = clients.clone();
 
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, addr, clients).await {
-                eprintln!{"Error handling client {}: {}", addr, e};
+                error!(client_addr = %addr, error = %e, "client handler failed");
             }
         });
     }
 }
 
+#[instrument(skip(socket, clients), fields(client_addr = %addr))]
 async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Handling client: {}", addr);
+    debug!("handling client connection");
 
     let mut buffer = vec![0u8; 4096];
 
@@ -74,33 +102,31 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
         if num_bytes == 0 {
             if let Some(username) = current_username {
                 clients.remove(&username);
-                println!("client {} (user: {}) disconnected", addr, username);
+                info!(username = %username, "client disconnected");
             } else {
-                println!("client {} disconnected (not registered)", addr);
+                info!("client disconnected (unregistered)");
             }
             break;
         }
 
         let message = decode_frame(&buffer[0..num_bytes]).map_err(|e| anyhow::anyhow!(e))?;
-        println!("Message from {} - {:?}", addr, message);
+        debug!(message = ?message, "received message");
 
         match message {
             Message::Connect { username } => {
-                // check if username is taken
                 if clients.contains_key(&username) {
-                    println!("user {} already exists", username);
+                    warn!(username = %username, "username already taken");
                     let response = Response::Error {
                         message: "username already taken".to_string()
                     };
                     tx.send(response).await?;
                 } else {
-                    // register client
                     clients.insert(username.clone(), ClientInfo {
                         sender: tx.clone(),
                         room: "general".to_string(),
                     });
                     current_username = Some(username.clone());
-                    println!("user {} registered", username);
+                    info!(username = %username, room = "general", "user registered");
 
                     let response = Response::Success {
                         message: format!("welcome, {}!", username)
@@ -128,11 +154,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                         }
                     }
                 } else {
-                    // user not registered - send error
-                    let response = Response::Error {
-                        message: "you must connect with a username first".to_string()
-                    };
-                    tx.send(response).await?;
+                    send_not_registered_error(&tx).await?;
                 }
             }
 
@@ -144,11 +166,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                     let response = Response::UserList { users };
                     tx.send(response).await?;
                 } else {
-                    // user not registered - send error
-                    let response = Response::Error {
-                        message: "you must connect with a username first".to_string()
-                    };
-                    tx.send(response).await?;
+                    send_not_registered_error(&tx).await?;
                 }
             }
 
@@ -172,11 +190,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                         tx.send(response).await?;
                     }
                 } else {
-                    // user not registered - send error
-                    let response = Response::Error {
-                        message: "you must connect with a username first".to_string()
-                    };
-                    tx.send(response).await?;
+                    send_not_registered_error(&tx).await?;
                 }
             }
 
@@ -191,11 +205,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
                     };
                     tx.send(response).await?;
                 } else {
-                    // user not registered - send error
-                    let response = Response::Error {
-                        message: "you must connect with a username first".to_string()
-                    };
-                    tx.send(response).await?;
+                    send_not_registered_error(&tx).await?;
                 }
             }
 
@@ -212,7 +222,16 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
     });
 
     // wait for both tasks
-    tokio::try_join!(read_task, write_task)?;
+    let (read_result, write_result) = tokio::try_join!(read_task, write_task)?;
+    read_result?;
+    write_result?;
 
     Ok(())
+}
+
+// helper function to send "not registered" error
+async fn send_not_registered_error(tx: &ClientSender) -> Result<(), mpsc::error::SendError<Response>> {
+    tx.send(Response::Error {
+        message: "you must connect with a username first".to_string(),
+    }).await
 }

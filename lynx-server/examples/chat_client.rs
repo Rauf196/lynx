@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // connect to server
     let mut socket = TcpStream::connect(server_addr()).await?;
-    println!("Connected to server");
+    println!("[*] connected to server");
 
     // send Connect message
     let msg = Message::Connect { username: username.clone() };
@@ -31,14 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // check if connection was successful
     match response {
         Response::Success { message } => {
-            println!("{}", message);
+            println!("[*] {}", message);
         }
         Response::Error { message } => {
-            eprintln!("Connection failed: {}", message);
+            eprintln!("[!] connection failed: {}", message);
             return Ok(());
         }
         _ => {
-            eprintln!("Unexpected response: {:?}", response);
+            eprintln!("[!] unexpected response: {:?}", response);
             return Ok(());
         }
     }
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             match read_half.read(&mut buffer).await {
                 Ok(0) => {
-                    println!("\nServer disconnected");
+                    println!("[*] server disconnected");
                     break;
                 }
                 Ok(n) => {
@@ -67,15 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             },
 
                             Response::UserList { users } => {
-                                println!("online users: {}", users.join(", "));
+                                println!("[*] online users: {}", users.join(", "));
                             },
 
                             Response::Error { message } => {
-                                println!("error: {}", message);
+                                eprintln!("[!] {}", message);
                             }
 
                             Response::Success { message } => {
-                                println!("{}", message);
+                                println!("[*] {}", message);
                             }
 
                             _ => println!("{:?}", response),
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Read error: {}", e);
+                    eprintln!("[!] read error: {}", e);
                     break;
                 }
             }
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut reader = BufReader::new(stdin);
         let mut line = String::new();
 
-        println!("\nYou can now send messages. Type and press Enter:");
+        println!("[*] ready to chat (type /help for commands)");
 
         loop {
             line.clear();
@@ -147,8 +147,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
+                            "/help" | "/h" => {
+                                println!("Commands:");
+                                println!("  /help, /h           - show this help");
+                                println!("  /users              - list online users");
+                                println!("  /join <room>        - join a room");
+                                println!("  /msg <user> <text>  - send private message");
+                                println!("  /quit, /q           - disconnect");
+                                println!();
+                                println!("To send a message to the room, just type and press enter.");
+                                continue;
+                            }
+
                             _ => {
-                                println!("unknown command: {}", command);
+                                eprintln!("[!] unknown command: {}", command);
                                 continue;
                             }
                         }
@@ -175,6 +187,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ = write_task => {},
     }
 
-    println!("Disconnected");
+    println!("[*] disconnected");
     Ok(())
 }
