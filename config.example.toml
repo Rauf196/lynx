@@ -1,0 +1,16 @@
+# Lynx Server Configuration
+# Copy this file to config.toml and modify as needed.
+# Environment variables (LYNX_*) override these values.
+
+# Host address to bind to
+host = "127.0.0.1"
+
+# Port to listen on
+port = 6006
+
+# Maximum number of concurrent connections
+maxconnections = 1000
+
+# Log level: trace, debug, info, warn, error
+# Can also be set via RUST_LOG environment variable
+loglevel = "info"

@@ -1,11 +1,13 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
 use lynx_protocol::{Message, Response, encode_frame, decode_response};
-use lynx_server::server_addr;
+use lynx_server::Config;
 use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load()?;
+
     // ask for username
     print!("Enter username: ");
     io::stdout().flush()?;
@@ -15,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let username = username.trim().to_string();
 
     // connect to server
-    let mut socket = TcpStream::connect(server_addr()).await?;
+    let mut socket = TcpStream::connect(config.address()).await?;
     println!("[*] connected to server");
 
     // send Connect message

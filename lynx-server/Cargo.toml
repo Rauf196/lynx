@@ -9,5 +9,8 @@ dashmap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+dotenvy = { workspace = true }
+config = { workspace = true }
 
 lynx-protocol = { path = "../lynx-protocol" }

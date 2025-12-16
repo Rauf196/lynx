@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use dashmap::DashMap;
 use lynx_protocol::{Message, Response, decode_frame, encode_response};
-use lynx_server::server_addr;
+use lynx_server::Config;
 use anyhow::Result;
 use tracing::{info, warn, error, debug, instrument};
 use tracing_subscriber::EnvFilter;
@@ -22,12 +22,18 @@ type Clients = Arc<DashMap<String, ClientInfo>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing subscriber
-    // RUST_LOG env var controls log level (e.g., RUST_LOG=debug, RUST_LOG=lynx_server=debug)
+    // load .env file if it exists (ignore errors)
+    let _ = dotenvy::dotenv();
+
+    // load configuration (defaults -> config.toml -> env vars)
+    let config = Config::load()?;
+
+    // initialize tracing subscriber
+    // RUST_LOG env var takes priority, otherwise use config.loglevel
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
+                .unwrap_or_else(|_| EnvFilter::new(&config.loglevel))
         )
         .with_target(true)
         .with_thread_ids(false)
@@ -35,7 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(false)
         .init();
 
-    let address = server_addr();
+    info!(
+        host = %config.host,
+        port = %config.port,
+        maxconnections = %config.maxconnections,
+        loglevel = %config.loglevel,
+        "configuration loaded"
+    );
+
+    let address = config.address();
 
     let listener = match TcpListener::bind(&address).await {
         Ok(l) => {

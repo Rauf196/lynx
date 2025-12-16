@@ -31,5 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Concurrency
 dashmap = "5.5"
 
+# Configuration
+dotenvy = "0.15"
+config = "0.14"
+
 # Testing & benchmarking
 criterion = "0.5"
