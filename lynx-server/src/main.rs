@@ -1,6 +1,7 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
+use tokio::task::JoinSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -49,29 +50,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clients: Clients = Arc::new(DashMap::new());
 
+    // track spawned client tasks so we can wait for them on shutdown
+    let mut client_tasks: JoinSet<()> = JoinSet::new();
+
+    // broadcast channel to notify all clients of shutdown
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    // create shutdown signal and pin it for reuse across loop iterations
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     // accept loop
     loop {
-        let (socket, addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(error = %e, "failed to accept connection");
-                continue;
-            }
-        };
-        info!(client_addr = %addr, "new connection");
+        tokio::select! {
+            result = listener.accept() => {
+                let (socket, addr) = match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(error = %e, "failed to accept connection");
+                        continue;
+                    }
+                };
+                info!(client_addr = %addr, "new connection");
 
-        let clients = clients.clone();
+                let clients = clients.clone();
+                let shutdown_rx = shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, addr, clients).await {
-                error!(client_addr = %addr, error = %e, "client handler failed");
+                client_tasks.spawn(async move {
+                    if let Err(e) = handle_client(socket, addr, clients, shutdown_rx).await {
+                        error!(client_addr = %addr, error = %e, "client handler failed");
+                    }
+                });
             }
-        });
+            _ = &mut shutdown => {
+                info!("shutdown signal received");
+                break;
+            }
+        }
     }
+
+    // drop sender to notify all clients that shutdown is happening
+    drop(shutdown_tx);
+
+    // wait for all client tasks to finish
+    info!(active_clients = client_tasks.len(), "waiting for clients to disconnect");
+    while client_tasks.join_next().await.is_some() {}
+
+    info!("server shutdown complete");
+    Ok(())
 }
 
-#[instrument(skip(socket, clients), fields(client_addr = %addr))]
-async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) -> Result<(), Box<dyn std::error::Error>> {
+#[instrument(skip(socket, clients, shutdown_rx), fields(client_addr = %addr))]
+async fn handle_client(
+    socket: TcpStream,
+    addr: SocketAddr,
+    clients: Clients,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
     debug!("handling client connection");
 
     let mut buffer = vec![0u8; 4096];
@@ -96,18 +131,35 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) ->
         let mut current_username: Option<String> = None;
 
         loop {
-        // read message
-        let num_bytes = read_half.read(&mut buffer).await?;
-
-        if num_bytes == 0 {
-            if let Some(username) = current_username {
-                clients.remove(&username);
-                info!(username = %username, "client disconnected");
-            } else {
-                info!("client disconnected (unregistered)");
+        // race: read from socket OR receive shutdown signal
+        let num_bytes = tokio::select! {
+            result = read_half.read(&mut buffer) => {
+                match result {
+                    Ok(0) => {
+                        // client disconnected normally
+                        if let Some(ref username) = current_username {
+                            clients.remove(username);
+                            info!(username = %username, "client disconnected");
+                        } else {
+                            info!("client disconnected (unregistered)");
+                        }
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) => return Err(anyhow::anyhow!(e)),
+                }
             }
-            break;
-        }
+            _ = shutdown_rx.recv() => {
+                // server is shutting down
+                if let Some(ref username) = current_username {
+                    clients.remove(username);
+                    info!(username = %username, "client disconnected (server shutdown)");
+                } else {
+                    info!("client disconnected (server shutdown, unregistered)");
+                }
+                break;
+            }
+        };
 
         let message = decode_frame(&buffer[0..num_bytes]).map_err(|e| anyhow::anyhow!(e))?;
         debug!(message = ?message, "received message");
@@ -234,4 +286,11 @@ async fn send_not_registered_error(tx: &ClientSender) -> Result<(), mpsc::error:
     tx.send(Response::Error {
         message: "you must connect with a username first".to_string(),
     }).await
+}
+
+// helper function to wait for shutdown signal (Ctrl+C)
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install ctrl+c handler");
 }
