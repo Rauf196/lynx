@@ -15,6 +15,12 @@ pub struct Config {
 
     #[serde(default = "default_loglevel")]
     pub loglevel: String,
+
+    #[serde(default = "default_metricshost")]
+    pub metricshost: String,
+
+    #[serde(default = "default_metricsport")]
+    pub metricsport: u16,
 }
 
 // default value functions for serde
@@ -34,6 +40,14 @@ fn default_loglevel() -> String {
     "info".to_string()
 }
 
+fn default_metricshost() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_metricsport() -> u16 {
+    9090
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -41,6 +55,8 @@ impl Default for Config {
             port: default_port(),
             maxconnections: default_maxconnections(),
             loglevel: default_loglevel(),
+            metricshost: default_metricshost(),
+            metricsport: default_metricsport(),
         }
     }
 }
@@ -55,7 +71,9 @@ impl Config {
             .set_default("host", default_host())?
             .set_default("port", default_port() as i64)?
             .set_default("maxconnections", default_maxconnections() as i64)?
-            .set_default("loglevel", default_loglevel())?;
+            .set_default("loglevel", default_loglevel())?
+            .set_default("metricshost", default_metricshost())?
+            .set_default("metricsport", default_metricsport() as i64)?;
 
         // load from config.toml if it exists
         if Path::new("config.toml").exists() {
@@ -76,6 +94,11 @@ impl Config {
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+
+    // returns metrics server address as "metricshost:metricsport"
+    pub fn metrics_address(&self) -> String {
+        format!("{}:{}", self.metricshost, self.metricsport)
+    }
 }
 
 #[cfg(test)]
@@ -89,11 +112,19 @@ mod tests {
         assert_eq!(config.port, 6006);
         assert_eq!(config.maxconnections, 1000);
         assert_eq!(config.loglevel, "info");
+        assert_eq!(config.metricshost, "127.0.0.1");
+        assert_eq!(config.metricsport, 9090);
     }
 
     #[test]
     fn test_address() {
         let config = Config::default();
         assert_eq!(config.address(), "127.0.0.1:6006");
+    }
+
+    #[test]
+    fn test_metrics_address() {
+        let config = Config::default();
+        assert_eq!(config.metrics_address(), "127.0.0.1:9090");
     }
 }

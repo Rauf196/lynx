@@ -13,4 +13,7 @@ serde = { workspace = true }
 dotenvy = { workspace = true }
 config = { workspace = true }
 
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
 lynx-protocol = { path = "../lynx-protocol" }

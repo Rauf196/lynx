@@ -37,3 +37,7 @@ config = "0.14"
 
 # Testing & benchmarking
 criterion = "0.5"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"

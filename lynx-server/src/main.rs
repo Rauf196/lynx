@@ -4,12 +4,15 @@ use tokio::sync::{mpsc, broadcast};
 use tokio::task::JoinSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use lynx_protocol::{Message, Response, decode_frame, encode_response};
 use lynx_server::Config;
 use anyhow::Result;
 use tracing::{info, warn, error, debug, instrument};
 use tracing_subscriber::EnvFilter;
+use metrics::{counter, gauge, histogram};
+use std::time::Instant;
 
 type ClientSender = mpsc::Sender<Response>;
 
@@ -49,6 +52,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "configuration loaded"
     );
 
+    // Initialize metrics server
+    lynx_server::metrics::init(&config.metrics_address())?;
+    info!(
+        metrics_address = %config.metrics_address(),
+        "metrics server started"
+    );
+
     let address = config.address();
 
     let listener = match TcpListener::bind(&address).await {
@@ -63,6 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let clients: Clients = Arc::new(DashMap::new());
+
+    // atomic counter for accurate active connection tracking
+    let active_connections = Arc::new(AtomicUsize::new(0));
 
     // track spawned client tasks so we can wait for them on shutdown
     let mut client_tasks: JoinSet<()> = JoinSet::new();
@@ -85,15 +98,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
+
+                // Track connection metrics
+                counter!("lynx_connections_total").increment(1);
+                gauge!("lynx_connections_active").increment(1.0);
+                active_connections.fetch_add(1, Ordering::Relaxed);
+
                 info!(client_addr = %addr, "new connection");
 
                 let clients = clients.clone();
                 let shutdown_rx = shutdown_tx.subscribe();
+                let active_connections = active_connections.clone();
 
                 client_tasks.spawn(async move {
                     if let Err(e) = handle_client(socket, addr, clients, shutdown_rx).await {
                         error!(client_addr = %addr, error = %e, "client handler failed");
                     }
+                    // Decrement active connections (handles all exit paths)
+                    gauge!("lynx_connections_active").decrement(1.0);
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             _ = &mut shutdown => {
@@ -107,7 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(shutdown_tx);
 
     // wait for all client tasks to finish
-    info!(active_clients = client_tasks.len(), "waiting for clients to disconnect");
+    let remaining = active_connections.load(Ordering::Relaxed);
+    if remaining > 0 {
+        info!(active_clients = remaining, "waiting for clients to disconnect");
+    }
     while client_tasks.join_next().await.is_some() {}
 
     info!("server shutdown complete");
@@ -175,13 +201,23 @@ async fn handle_client(
             }
         };
 
-        let message = decode_frame(&buffer[0..num_bytes]).map_err(|e| anyhow::anyhow!(e))?;
+        let message = match decode_frame(&buffer[0..num_bytes]) {
+            Ok(msg) => msg,
+            Err(e) => {
+                counter!("lynx_errors_total", "error_type" => "decode_error").increment(1);
+                return Err(anyhow::anyhow!(e));
+            }
+        };
         debug!(message = ?message, "received message");
 
+        // Start timing message processing
+        let processing_start = Instant::now();
+
         match message {
-            Message::Connect { username } => {
-                if clients.contains_key(&username) {
+            Message::Connect { ref username } => {
+                if clients.contains_key(username) {
                     warn!(username = %username, "username already taken");
+                    counter!("lynx_errors_total", "error_type" => "username_taken").increment(1);
                     let response = Response::Error {
                         message: "username already taken".to_string()
                     };
@@ -201,7 +237,7 @@ async fn handle_client(
                 }
             }
 
-            Message::SendRoomMessage { text } => {
+            Message::SendRoomMessage { ref text } => {
                 if let Some(ref sender_username) = current_username {
                     // get sender's room
                     let sender_room = clients.get(sender_username)
@@ -236,9 +272,9 @@ async fn handle_client(
                 }
             }
 
-            Message::SendPrivateMessage { to, text } => {
+            Message::SendPrivateMessage { ref to, ref text } => {
                 if let Some(ref sender_username) = current_username {
-                    if let Some(recipient) = clients.get(&to) {
+                    if let Some(recipient) = clients.get(to) {
                         let client_tx = recipient.value();
 
                         let msg = Response::IncomingMessage {
@@ -250,6 +286,7 @@ async fn handle_client(
                         let _ = client_tx.sender.send(msg).await;
                     } else {
                         // recipient not registered - send error
+                        counter!("lynx_errors_total", "error_type" => "recipient_not_found").increment(1);
                         let response = Response::Error {
                             message: "recipient with that username could not be found".to_string()
                         };
@@ -260,7 +297,7 @@ async fn handle_client(
                 }
             }
 
-            Message::JoinRoom { room_name } => {
+            Message::JoinRoom { ref room_name } => {
                 if let Some(ref username) = current_username {
                     if let Some(mut entry) = clients.get_mut(username) {
                         entry.room = room_name.clone();
@@ -283,6 +320,23 @@ async fn handle_client(
                 tx.send(response).await?;
             }
         }
+
+        // Track message metrics
+        let message_type = match &message {
+            Message::Connect { .. } => "connect",
+            Message::SendRoomMessage { .. } => "send_room_message",
+            Message::SendPrivateMessage { .. } => "send_private_message",
+            Message::JoinRoom { .. } => "join_room",
+            Message::ListUsers => "list_users",
+            Message::Disconnect => "disconnect",
+        };
+        counter!("lynx_messages_processed_total", "message_type" => message_type).increment(1);
+
+        // Record processing duration
+        histogram!(
+            "lynx_message_processing_duration_seconds",
+            "message_type" => message_type
+        ).record(processing_start.elapsed().as_secs_f64());
     }
         Ok::<(), anyhow::Error>(())
     });
@@ -297,6 +351,7 @@ async fn handle_client(
 
 // helper function to send "not registered" error
 async fn send_not_registered_error(tx: &ClientSender) -> Result<(), mpsc::error::SendError<Response>> {
+    counter!("lynx_errors_total", "error_type" => "not_registered").increment(1);
     tx.send(Response::Error {
         message: "you must connect with a username first".to_string(),
     }).await
