@@ -176,7 +176,8 @@ async fn handle_client(
             result = read_half.read(&mut buffer) => {
                 match result {
                     Ok(0) => {
-                        // client disconnected normally
+                        // client disconnected normally (TCP EOF)
+                        counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
                         if let Some(ref username) = current_username {
                             clients.remove(username);
                             info!(username = %username, "client disconnected");
@@ -191,6 +192,7 @@ async fn handle_client(
             }
             _ = shutdown_rx.recv() => {
                 // server is shutting down
+                counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
                 if let Some(ref username) = current_username {
                     clients.remove(username);
                     info!(username = %username, "client disconnected (server shutdown)");
