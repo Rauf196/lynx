@@ -12,7 +12,7 @@ const LATENCY_BUCKETS: &[f64] = &[
 
 /// Initialize the Prometheus metrics exporter.
 /// Starts HTTP server on the given address for /metrics endpoint.
-pub fn init(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn init(addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket_addr: SocketAddr = addr.parse()?;
 
     PrometheusBuilder::new()
@@ -55,7 +55,7 @@ pub fn init(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Initialize error counters for each error type
-    for err_type in ["username_taken", "not_registered", "recipient_not_found", "decode_error"] {
+    for err_type in ["username_taken", "not_registered", "recipient_not_found", "decode_error", "already_authenticated"] {
         counter!("lynx_errors_total", "error_type" => err_type).absolute(0);
     }
 

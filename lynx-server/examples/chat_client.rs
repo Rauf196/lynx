@@ -1,6 +1,6 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
-use lynx_protocol::{Message, Response, encode_frame, decode_response};
+use lynx_protocol::{Message, Response, encode_frame, try_extract_response};
 use lynx_server::Config;
 use std::io::{self, Write};
 
@@ -25,10 +25,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame = encode_frame(&msg)?;
     socket.write_all(&frame).await?;
 
-    // read the welcome response
+    // read the welcome response using accumulator pattern
     let mut buffer = vec![0u8; 4096];
-    let n = socket.read(&mut buffer).await?;
-    let response = decode_response(&buffer[..n])?;
+    let mut accumulator: Vec<u8> = Vec::new();
+
+    let response = loop {
+        let n = socket.read(&mut buffer).await?;
+        if n == 0 {
+            return Err("server disconnected before welcome".into());
+        }
+        accumulator.extend_from_slice(&buffer[..n]);
+
+        if let Some((resp, _consumed)) = try_extract_response(&accumulator)? {
+            break resp;
+        }
+        // need more data, continue reading
+    };
 
     // check if connection was successful
     match response {
@@ -48,17 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // split socket for concurrent reading/writing
     let (mut read_half, mut write_half) = socket.into_split();
 
-    // spawn task to read from server
+    // spawn task to read from server using accumulator pattern
     let read_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 4096];
+        let mut accumulator: Vec<u8> = Vec::new();
+
         loop {
-            match read_half.read(&mut buffer).await {
-                Ok(0) => {
-                    println!("[*] server disconnected");
-                    break;
-                }
-                Ok(n) => {
-                    if let Ok(response) = decode_response(&buffer[..n]) {
+            // first, try to extract any complete messages from accumulator
+            loop {
+                match try_extract_response(&accumulator) {
+                    Ok(Some((response, consumed))) => {
+                        // process the response
                         match response {
                             Response::IncomingMessage { from, text, room } => {
                                 if let Some(room) = room {
@@ -66,23 +78,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     println!("[DM] {}: {}", from, text);
                                 }
-                            },
-
+                            }
                             Response::UserList { users } => {
                                 println!("[*] online users: {}", users.join(", "));
-                            },
-
+                            }
                             Response::Error { message } => {
                                 eprintln!("[!] {}", message);
                             }
-
                             Response::Success { message } => {
                                 println!("[*] {}", message);
                             }
-
                             _ => println!("{:?}", response),
                         }
+                        // remove processed bytes
+                        accumulator.drain(..consumed);
                     }
+                    Ok(None) => {
+                        // need more data
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("[!] decode error: {}", e);
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+            }
+
+            // read more data from socket
+            match read_half.read(&mut buffer).await {
+                Ok(0) => {
+                    println!("[*] server disconnected");
+                    break;
+                }
+                Ok(n) => {
+                    accumulator.extend_from_slice(&buffer[..n]);
                 }
                 Err(e) => {
                     eprintln!("[!] read error: {}", e);

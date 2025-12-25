@@ -1,0 +1,342 @@
+use anyhow::Result;
+use dashmap::DashMap;
+use lynx_protocol::{try_extract_frame, encode_response, Message, Response};
+use metrics::{counter, gauge, histogram};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
+use tracing::{debug, error, info, instrument, warn};
+
+type ClientSender = mpsc::Sender<Response>;
+
+struct ClientInfo {
+    sender: ClientSender,
+    room: String,
+}
+
+type Clients = Arc<DashMap<String, ClientInfo>>;
+
+pub struct ServerHandle {
+    pub local_addr: SocketAddr,
+    shutdown_tx: broadcast::Sender<()>,
+}
+
+impl ServerHandle {
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(());
+    }
+}
+
+pub struct Server {
+    listener: TcpListener,
+    clients: Clients,
+    shutdown_tx: broadcast::Sender<()>,
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl Server {
+    /// bind to address. use port 0 for ephemeral port.
+    pub async fn bind(addr: &str) -> io::Result<(Self, ServerHandle)> {
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+        let server = Self {
+            listener,
+            clients: Arc::new(DashMap::new()),
+            shutdown_tx: shutdown_tx.clone(),
+            active_connections: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let handle = ServerHandle {
+            local_addr,
+            shutdown_tx,
+        };
+
+        Ok((server, handle))
+    }
+
+    /// run until shutdown is triggered via handle.shutdown()
+    pub async fn run(self) -> Result<()> {
+        let mut client_tasks: JoinSet<()> = JoinSet::new();
+
+        info!(address = %self.listener.local_addr()?, "server accepting connections");
+
+        // subscribe once for the accept loop shutdown check
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        loop {
+            tokio::select! {
+                result = self.listener.accept() => {
+                    match result {
+                        Ok((socket, addr)) => {
+                            counter!("lynx_connections_total").increment(1);
+                            gauge!("lynx_connections_active").increment(1.0);
+                            self.active_connections.fetch_add(1, Ordering::Relaxed);
+
+                            info!(client_addr = %addr, "new connection");
+
+                            let clients = self.clients.clone();
+                            let client_shutdown_rx = self.shutdown_tx.subscribe();
+                            let active_connections = self.active_connections.clone();
+
+                            client_tasks.spawn(async move {
+                                if let Err(e) = handle_client(socket, addr, clients, client_shutdown_rx).await {
+                                    error!(client_addr = %addr, error = %e, "client handler error");
+                                }
+                                gauge!("lynx_connections_active").decrement(1.0);
+                                active_connections.fetch_sub(1, Ordering::Relaxed);
+                            });
+                        }
+                        Err(e) => {
+                            error!(error = %e, "accept failed");
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("shutdown signal received");
+                    break;
+                }
+            }
+        }
+
+        // wait for all client tasks to complete
+        let remaining = self.active_connections.load(Ordering::Relaxed);
+        if remaining > 0 {
+            info!(active_clients = remaining, "waiting for clients to disconnect");
+        }
+        while client_tasks.join_next().await.is_some() {}
+
+        info!("server shutdown complete");
+        Ok(())
+    }
+}
+
+#[instrument(skip(socket, clients, shutdown_rx), fields(client_addr = %addr))]
+async fn handle_client(
+    socket: TcpStream,
+    addr: SocketAddr,
+    clients: Clients,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Result<()> {
+    debug!("handling client connection");
+
+    let (tx, mut rx) = mpsc::channel::<Response>(100);
+    let (mut read_half, mut write_half) = socket.into_split();
+
+    let write_task = tokio::spawn(async move {
+        while let Some(response) = rx.recv().await {
+            let frame = encode_response(&response).map_err(|e| anyhow::anyhow!(e))?;
+            write_half.write_all(&frame).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let read_task = tokio::spawn(async move {
+        let mut current_username: Option<String> = None;
+        let mut buffer = vec![0u8; 4096];
+        let mut accumulator: Vec<u8> = Vec::with_capacity(8192);
+
+        loop {
+            // process complete messages in accumulator
+            loop {
+                match try_extract_frame(&accumulator) {
+                    Ok(Some((message, consumed))) => {
+                        process_message(&message, &mut current_username, &clients, &tx).await?;
+                        accumulator.drain(..consumed);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        counter!("lynx_errors_total", "error_type" => "decode_error").increment(1);
+                        return Err(anyhow::anyhow!(e));
+                    }
+                }
+            }
+
+            // read from socket or shutdown
+            let num_bytes = tokio::select! {
+                result = read_half.read(&mut buffer) => {
+                    match result {
+                        Ok(0) => {
+                            counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
+                            if let Some(ref username) = current_username {
+                                clients.remove(username);
+                                info!(username = %username, "client disconnected");
+                            }
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(e) => return Err(anyhow::anyhow!(e)),
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
+                    if let Some(ref username) = current_username {
+                        clients.remove(username);
+                        info!(username = %username, "client disconnected (shutdown)");
+                    }
+                    break;
+                }
+            };
+
+            accumulator.extend_from_slice(&buffer[..num_bytes]);
+        }
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let (read_result, write_result) = tokio::try_join!(read_task, write_task)?;
+    read_result?;
+    write_result?;
+
+    Ok(())
+}
+
+async fn process_message(
+    message: &Message,
+    current_username: &mut Option<String>,
+    clients: &Clients,
+    tx: &ClientSender,
+) -> Result<()> {
+    let processing_start = Instant::now();
+
+    match message {
+        Message::Connect { username } => {
+            if current_username.is_some() {
+                warn!(username = %username, "already authenticated, rejecting connect");
+                counter!("lynx_errors_total", "error_type" => "already_authenticated").increment(1);
+                tx.send(Response::Error {
+                    message: "already connected with a username".to_string(),
+                })
+                .await?;
+            } else if clients.contains_key(username) {
+                warn!(username = %username, "username taken");
+                counter!("lynx_errors_total", "error_type" => "username_taken").increment(1);
+                tx.send(Response::Error {
+                    message: "username already taken".to_string(),
+                })
+                .await?;
+            } else {
+                clients.insert(
+                    username.clone(),
+                    ClientInfo {
+                        sender: tx.clone(),
+                        room: "general".to_string(),
+                    },
+                );
+                *current_username = Some(username.clone());
+                info!(username = %username, room = "general", "user registered");
+                tx.send(Response::Success {
+                    message: format!("welcome, {}!", username),
+                })
+                .await?;
+            }
+        }
+
+        Message::SendRoomMessage { text } => {
+            if let Some(sender_username) = current_username {
+                let sender_room = clients
+                    .get(sender_username)
+                    .map(|e| e.room.clone())
+                    .unwrap_or_else(|| "general".to_string());
+
+                for entry in clients.iter() {
+                    if entry.room == sender_room {
+                        let msg = Response::IncomingMessage {
+                            from: sender_username.clone(),
+                            text: text.clone(),
+                            room: Some(sender_room.clone()),
+                        };
+                        let _ = entry.sender.send(msg).await;
+                    }
+                }
+            } else {
+                send_not_registered_error(tx).await?;
+            }
+        }
+
+        Message::ListUsers => {
+            if current_username.is_some() {
+                let users: Vec<String> = clients.iter().map(|e| e.key().clone()).collect();
+                tx.send(Response::UserList { users }).await?;
+            } else {
+                send_not_registered_error(tx).await?;
+            }
+        }
+
+        Message::SendPrivateMessage { to, text } => {
+            if let Some(sender_username) = current_username {
+                if let Some(recipient) = clients.get(to) {
+                    let msg = Response::IncomingMessage {
+                        from: sender_username.clone(),
+                        text: text.clone(),
+                        room: None,
+                    };
+                    let _ = recipient.sender.send(msg).await;
+                } else {
+                    counter!("lynx_errors_total", "error_type" => "recipient_not_found").increment(1);
+                    tx.send(Response::Error {
+                        message: "recipient not found".to_string(),
+                    })
+                    .await?;
+                }
+            } else {
+                send_not_registered_error(tx).await?;
+            }
+        }
+
+        Message::JoinRoom { room_name } => {
+            if let Some(username) = current_username {
+                if let Some(mut entry) = clients.get_mut(username) {
+                    entry.room = room_name.clone();
+                }
+                info!(username = %username, room = %room_name, "user joined room");
+                tx.send(Response::Success {
+                    message: format!("joined room: {}", room_name),
+                })
+                .await?;
+            } else {
+                send_not_registered_error(tx).await?;
+            }
+        }
+
+        Message::Disconnect => {
+            tx.send(Response::Success {
+                message: "goodbye".to_string(),
+            })
+            .await?;
+        }
+    }
+
+    let message_type = match message {
+        Message::Connect { .. } => "connect",
+        Message::SendRoomMessage { .. } => "send_room_message",
+        Message::SendPrivateMessage { .. } => "send_private_message",
+        Message::JoinRoom { .. } => "join_room",
+        Message::ListUsers => "list_users",
+        Message::Disconnect => "disconnect",
+    };
+    counter!("lynx_messages_processed_total", "message_type" => message_type).increment(1);
+    histogram!(
+        "lynx_message_processing_duration_seconds",
+        "message_type" => message_type
+    )
+    .record(processing_start.elapsed().as_secs_f64());
+
+    Ok(())
+}
+
+async fn send_not_registered_error(tx: &ClientSender) -> Result<(), mpsc::error::SendError<Response>> {
+    counter!("lynx_errors_total", "error_type" => "not_registered").increment(1);
+    tx.send(Response::Error {
+        message: "you must connect with a username first".to_string(),
+    })
+    .await
+}
