@@ -31,13 +31,16 @@ async fn main() -> Result<()> {
     let (server, handle) = Server::bind(&config.address()).await?;
     info!(address = %handle.local_addr, "server bound");
 
-    tokio::select! {
-        result = server.run() => result?,
-        _ = tokio::signal::ctrl_c() => {
-            info!("ctrl+c received");
+    // spawn signal handler to trigger shutdown
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("ctrl+c received, initiating shutdown");
             handle.shutdown();
         }
-    }
+    });
+
+    // run server until shutdown completes
+    server.run().await?;
 
     Ok(())
 }
