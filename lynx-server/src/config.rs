@@ -84,7 +84,7 @@ impl Config {
         builder = builder.add_source(
             Environment::with_prefix("LYNX")
                 .separator("_")
-                .try_parsing(true)
+                .try_parsing(true),
         );
 
         builder.build()?.try_deserialize()

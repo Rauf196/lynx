@@ -3,6 +3,7 @@ members = [
     "lynx-server",
     "lynx-protocol",
     "lynx-bench",
+    "lynx-load",
 ]
 resolver = "2"
 
@@ -41,3 +42,9 @@ criterion = "0.5"
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Random
+rand = { version = "0.8", features = ["small_rng"] }

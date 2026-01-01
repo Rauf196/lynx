@@ -24,13 +24,19 @@ pub enum Message {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Response {
     // generic success
-    Success { message: String },
+    Success {
+        message: String,
+    },
 
     // something went wrong
-    Error { message: String },
+    Error {
+        message: String,
+    },
 
     // list of online users
-    UserList { users: Vec<String> },
+    UserList {
+        users: Vec<String>,
+    },
 
     // someone sent a message
     IncomingMessage {
@@ -40,7 +46,9 @@ pub enum Response {
     },
 
     // system notification
-    SystemNotification { text: String },
+    SystemNotification {
+        text: String,
+    },
 }
 
 /// Encodes a message into a length-prefixed frame.
@@ -48,8 +56,7 @@ pub enum Response {
 /// Returns a Vec<u8> with format: [4 bytes length][message bytes]
 pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, String> {
     // serialize message to bytes
-    let msg_bytes = bincode::serialize(msg)
-        .map_err(|e| format!("serialization failed: {}", e))?;
+    let msg_bytes = bincode::serialize(msg).map_err(|e| format!("serialization failed: {}", e))?;
 
     // get the length (as u32) and convert to 4 bytes
     let length = msg_bytes.len() as u32;
@@ -86,8 +93,8 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Message, String> {
     let msg_bytes = &bytes[4..4 + length];
 
     // deserialize
-    let message = bincode::deserialize(msg_bytes)
-        .map_err(|e| format!("deserialization failed: {}", e))?;
+    let message =
+        bincode::deserialize(msg_bytes).map_err(|e| format!("deserialization failed: {}", e))?;
 
     Ok(message)
 }
@@ -97,8 +104,8 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Message, String> {
 /// Returns a Vec<u8> with format: [4 bytes length][response bytes]
 pub fn encode_response(resp: &Response) -> Result<Vec<u8>, String> {
     // serialize response to bytes
-    let resp_bytes = bincode::serialize(resp)
-        .map_err(|e| format!("serialization failed: {}", e))?;
+    let resp_bytes =
+        bincode::serialize(resp).map_err(|e| format!("serialization failed: {}", e))?;
 
     // get the length (as u32) and convert to 4 bytes
     let length = resp_bytes.len() as u32;
@@ -135,8 +142,8 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, String> {
     let resp_bytes = &bytes[4..4 + length];
 
     // deserialize
-    let response = bincode::deserialize(resp_bytes)
-        .map_err(|e| format!("deserialization failed: {}", e))?;
+    let response =
+        bincode::deserialize(resp_bytes).map_err(|e| format!("deserialization failed: {}", e))?;
 
     Ok(response)
 }
@@ -265,7 +272,9 @@ mod tests {
 
     #[test]
     fn test_try_extract_frame_complete() {
-        let msg = Message::Connect { username: "test".to_string() };
+        let msg = Message::Connect {
+            username: "test".to_string(),
+        };
         let frame = encode_frame(&msg).unwrap();
 
         let result = try_extract_frame(&frame).unwrap();
@@ -296,7 +305,9 @@ mod tests {
 
     #[test]
     fn test_try_extract_frame_multiple_messages() {
-        let msg1 = Message::Connect { username: "alice".to_string() };
+        let msg1 = Message::Connect {
+            username: "alice".to_string(),
+        };
         let msg2 = Message::ListUsers;
 
         let mut bytes = encode_frame(&msg1).unwrap();
@@ -324,7 +335,9 @@ mod tests {
 
     #[test]
     fn test_try_extract_response_complete() {
-        let resp = Response::Success { message: "ok".to_string() };
+        let resp = Response::Success {
+            message: "ok".to_string(),
+        };
         let frame = encode_response(&resp).unwrap();
 
         let result = try_extract_response(&frame).unwrap();

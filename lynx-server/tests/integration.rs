@@ -1,4 +1,4 @@
-use lynx_protocol::{encode_frame, try_extract_response, Message, Response};
+use lynx_protocol::{Message, Response, encode_frame, try_extract_response};
 use lynx_server::{Server, ServerHandle};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -55,8 +55,8 @@ impl TestClient {
 
         loop {
             // try to extract from accumulator first
-            if let Some((response, consumed)) = try_extract_response(&self.accumulator)
-                .map_err(|e| anyhow::anyhow!(e))?
+            if let Some((response, consumed)) =
+                try_extract_response(&self.accumulator).map_err(|e| anyhow::anyhow!(e))?
             {
                 self.accumulator.drain(..consumed);
                 return Ok(response);
@@ -173,7 +173,10 @@ async fn test_room_isolation() {
 
     // bob should NOT receive anything - verify with timeout
     let result = timeout(Duration::from_millis(100), bob.recv()).await;
-    assert!(result.is_err(), "bob should not receive message from different room");
+    assert!(
+        result.is_err(),
+        "bob should not receive message from different room"
+    );
 
     server.shutdown();
 }
@@ -262,7 +265,10 @@ async fn test_private_message() {
 
     // charlie should NOT receive the private message
     let result = timeout(Duration::from_millis(100), charlie.recv()).await;
-    assert!(result.is_err(), "charlie should not receive private message");
+    assert!(
+        result.is_err(),
+        "charlie should not receive private message"
+    );
 
     server.shutdown();
 }

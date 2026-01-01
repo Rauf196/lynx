@@ -1,8 +1,8 @@
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
 use lynx_protocol::{Message, Response, encode_frame, try_extract_response};
 use lynx_server::Config;
 use std::io::{self, Write};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,7 +21,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[*] connected to server");
 
     // send Connect message
-    let msg = Message::Connect { username: username.clone() };
+    let msg = Message::Connect {
+        username: username.clone(),
+    };
     let frame = encode_frame(&msg)?;
     socket.write_all(&frame).await?;
 
@@ -154,7 +156,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             "/join" => {
                                 if let Some(room_name) = args {
-                                    Message::JoinRoom { room_name: room_name.to_string() }
+                                    Message::JoinRoom {
+                                        room_name: room_name.to_string(),
+                                    }
                                 } else {
                                     println!("usage: /join <room>");
                                     continue;
@@ -186,7 +190,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("  /msg <user> <text>  - send private message");
                                 println!("  /quit, /q           - disconnect");
                                 println!();
-                                println!("To send a message to the room, just type and press enter.");
+                                println!(
+                                    "To send a message to the room, just type and press enter."
+                                );
                                 continue;
                             }
 

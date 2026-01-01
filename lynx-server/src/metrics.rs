@@ -36,10 +36,7 @@ pub fn init(addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         "lynx_messages_processed_total",
         "Total messages processed by type"
     );
-    describe_counter!(
-        "lynx_errors_total",
-        "Total errors by type"
-    );
+    describe_counter!("lynx_errors_total", "Total errors by type");
     describe_histogram!(
         "lynx_message_processing_duration_seconds",
         "Message processing duration in seconds"
@@ -50,12 +47,25 @@ pub fn init(addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     counter!("lynx_connections_total").absolute(0);
 
     // Initialize message counters for each message type
-    for msg_type in ["connect", "send_room_message", "send_private_message", "join_room", "list_users", "disconnect"] {
+    for msg_type in [
+        "connect",
+        "send_room_message",
+        "send_private_message",
+        "join_room",
+        "list_users",
+        "disconnect",
+    ] {
         counter!("lynx_messages_processed_total", "message_type" => msg_type).absolute(0);
     }
 
     // Initialize error counters for each error type
-    for err_type in ["username_taken", "not_registered", "recipient_not_found", "decode_error", "already_authenticated"] {
+    for err_type in [
+        "username_taken",
+        "not_registered",
+        "recipient_not_found",
+        "decode_error",
+        "already_authenticated",
+    ] {
         counter!("lynx_errors_total", "error_type" => err_type).absolute(0);
     }
 
