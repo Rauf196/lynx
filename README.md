@@ -82,10 +82,10 @@ cargo run -p lynx-server --release --example chat_client
 ### Client Commands
 
 ```
-/join <room>     - Join a chat room
-/msg <user> <text> - Send private message
-/users           - List online users
-/quit            - Disconnect
+/join <room>        Join a chat room
+/msg <user> <text>  Send private message
+/users              List online users
+/quit               Disconnect
 ```
 
 ## Architecture
