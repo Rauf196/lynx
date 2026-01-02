@@ -22,3 +22,8 @@ Thumbs.db
 
 # Ptactise files (trying before implementing)
 practise/
+
+# Profiling artifacts
+perf.data
+*.perf.data
+flamegraph.svg

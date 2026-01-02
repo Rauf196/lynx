@@ -162,45 +162,45 @@ async fn handle_client(
         let mut current_username: Option<String> = None;
         let mut buffer = vec![0u8; 4096];
         let mut accumulator: Vec<u8> = Vec::with_capacity(8192);
+        let mut task_error: Option<anyhow::Error> = None;
 
-        loop {
+        'main: loop {
             // process complete messages in accumulator
             loop {
                 match try_extract_frame(&accumulator) {
                     Ok(Some((message, consumed))) => {
-                        process_message(&message, &mut current_username, &clients, &tx).await?;
+                        if let Err(e) = process_message(&message, &mut current_username, &clients, &tx).await {
+                            task_error = Some(e);
+                            break 'main;
+                        }
                         accumulator.drain(..consumed);
                     }
                     Ok(None) => break,
                     Err(e) => {
                         counter!("lynx_errors_total", "error_type" => "decode_error").increment(1);
-                        return Err(anyhow::anyhow!(e));
+                        task_error = Some(anyhow::anyhow!(e));
+                        break 'main;
                     }
                 }
             }
 
             // read from socket or shutdown
             let num_bytes = tokio::select! {
-                result = read_half.read(&mut buffer) => {
-                    match result {
+                read_result = read_half.read(&mut buffer) => {
+                    match read_result {
                         Ok(0) => {
                             counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
-                            if let Some(ref username) = current_username {
-                                clients.remove(username);
-                                info!(username = %username, "client disconnected");
-                            }
                             break;
                         }
                         Ok(n) => n,
-                        Err(e) => return Err(anyhow::anyhow!(e)),
+                        Err(e) => {
+                            task_error = Some(anyhow::anyhow!(e));
+                            break 'main;
+                        }
                     }
                 }
                 _ = read_shutdown_rx.recv() => {
                     counter!("lynx_messages_processed_total", "message_type" => "disconnect").increment(1);
-                    if let Some(ref username) = current_username {
-                        clients.remove(username);
-                        info!(username = %username, "client disconnected (shutdown)");
-                    }
                     break;
                 }
             };
@@ -208,7 +208,20 @@ async fn handle_client(
             accumulator.extend_from_slice(&buffer[..num_bytes]);
         }
 
-        Ok::<(), anyhow::Error>(())
+        // cleanup - always runs regardless of how loop exited
+        if let Some(username) = current_username {
+            clients.remove(&username);
+            if task_error.is_some() {
+                warn!(username = %username, "client removed (error)");
+            } else {
+                info!(username = %username, "client disconnected");
+            }
+        }
+
+        match task_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     });
 
     let (read_result, write_result) = tokio::try_join!(read_task, write_task)?;
@@ -330,10 +343,15 @@ async fn process_message(
         }
 
         Message::Disconnect => {
-            tx.send(Response::Success {
+            if let Some(username) = current_username.take() {
+                clients.remove(&username);
+                info!(username = %username, "client disconnected");
+            }
+            // ignore send error - client may already be gone
+            let _ = tx.send(Response::Success {
                 message: "goodbye".to_string(),
             })
-            .await?;
+            .await;
         }
     }
 
