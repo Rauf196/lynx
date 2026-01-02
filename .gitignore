@@ -1,5 +1,7 @@
 # Project planning/notes
 docs/
+!docs/logo/
+!docs/profiling/
 
 # Rust build artifacts
 /target
