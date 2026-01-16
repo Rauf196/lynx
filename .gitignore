@@ -1,5 +1,7 @@
 # Project planning/notes
-docs/
+docs/*
+!docs/logo/
+docs/logo/*
 !docs/logo/lynx-logo-v2-nobg.png
 !docs/profiling/
 !docs/benchmark/
