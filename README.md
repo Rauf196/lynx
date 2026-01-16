@@ -47,6 +47,24 @@ cargo run -p lynx-load --release -- -c <clients> -r <rooms> -m 50 --batch-size 5
 
 **Profiling results:** Server is I/O bound (37% in kernel `sendto`), with no application-level bottlenecks. Tokio runtime overhead is ~1%. See [profiling details](docs/profiling/RESULTS.md).
 
+## Benchmarks
+
+Micro-benchmarks using Criterion:
+
+| Operation | Time | Throughput |
+|-----------|------|------------|
+| Encode message | 50-177 ns | 5-20M/s |
+| Decode message | 12-135 ns | 7-80M/s |
+| Broadcast to 1K clients | 89 us | 11K/s |
+| Broadcast to 10K clients | 1.1 ms | 900/s |
+
+```bash
+# Run benchmarks
+cargo bench --workspace
+```
+
+See [docs/benchmark/BENCHMARKS.md](docs/benchmark/BENCHMARKS.md) for detailed results and analysis.
+
 ## Features
 
 - **Async I/O** - Built on Tokio for efficient handling of thousands of concurrent connections
@@ -224,13 +242,16 @@ lynx/
 │   │   └── metrics.rs    # Prometheus setup
 │   ├── tests/
 │   │   └── integration.rs # 13 integration tests
+│   ├── benches/
+│   │   └── broadcast.rs  # Broadcast scaling benchmarks
 │   └── examples/
 │       └── chat_client.rs # Interactive CLI client
 ├── lynx-protocol/        # Shared protocol library
-│   └── src/lib.rs        # Message types, encoding
-├── lynx-load/            # Load testing tool
-│   └── src/main.rs       # Configurable load generator
-└── lynx-bench/           # Benchmarks (WIP)
+│   ├── src/lib.rs        # Message types, encoding
+│   └── benches/
+│       └── protocol.rs   # Encode/decode benchmarks
+└── lynx-load/            # Load testing tool
+    └── src/main.rs       # Configurable load generator
 ```
 
 ## Testing
@@ -241,6 +262,13 @@ cargo test --workspace
 
 # Run with output
 cargo test --workspace -- --nocapture
+
+# Run benchmarks
+cargo bench --workspace
+
+# Run specific benchmark group
+cargo bench -p lynx-protocol -- "encode/"
+cargo bench -p lynx-server -- "broadcast/"
 ```
 
 ## Roadmap
@@ -248,8 +276,8 @@ cargo test --workspace -- --nocapture
 - [x] Phase 1: Async foundations, protocol design
 - [x] Phase 2: Core server, room-based chat
 - [x] Phase 3: Metrics, configuration, graceful shutdown
-- [x] Phase 4: Integration tests, load tests, profiling
-- [ ] Phase 5: Benchmarking (Criterion)
+- [x] Phase 4: Integration tests, load tests, profiling, benchmarking
+- [ ] Phase 5: Resource management (connection limits, rate limiting)
 - [ ] Phase 6: CI/CD, Docker, documentation polish
 
 ## License

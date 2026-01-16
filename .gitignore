@@ -2,6 +2,7 @@
 docs/
 !docs/logo/lynx-logo-v2-nobg.png
 !docs/profiling/
+!docs/benchmark/
 
 # Rust build artifacts
 /target

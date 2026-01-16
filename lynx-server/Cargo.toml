@@ -17,3 +17,10 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 lynx-protocol = { path = "../lynx-protocol" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "broadcast"
+harness = false
