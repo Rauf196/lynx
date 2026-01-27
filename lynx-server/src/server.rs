@@ -1,3 +1,5 @@
+use crate::Config;
+use crate::rate_limiter::TokenBucket;
 use anyhow::Result;
 use dashmap::DashMap;
 use lynx_protocol::{Message, Response, encode_response, try_extract_frame};
@@ -18,6 +20,8 @@ type ClientSender = mpsc::Sender<Response>;
 struct ClientInfo {
     sender: ClientSender,
     room: String,
+    dropped_count: AtomicUsize,
+    rate_limiter: TokenBucket,
 }
 
 type Clients = Arc<DashMap<String, ClientInfo>>;
@@ -38,11 +42,22 @@ pub struct Server {
     clients: Clients,
     shutdown_tx: broadcast::Sender<()>,
     active_connections: Arc<AtomicUsize>,
+    config: Arc<Config>,
 }
 
 impl Server {
+    /// get a clone of the active connections counter for health checks.
+    pub fn active_connections(&self) -> Arc<AtomicUsize> {
+        self.active_connections.clone()
+    }
+
+    /// get the max connections limit from config.
+    pub fn max_connections(&self) -> usize {
+        self.config.maxconnections
+    }
+
     /// bind to address. use port 0 for ephemeral port.
-    pub async fn bind(addr: &str) -> io::Result<(Self, ServerHandle)> {
+    pub async fn bind(addr: &str, config: Config) -> io::Result<(Self, ServerHandle)> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
 
@@ -53,6 +68,7 @@ impl Server {
             clients: Arc::new(DashMap::new()),
             shutdown_tx: shutdown_tx.clone(),
             active_connections: Arc::new(AtomicUsize::new(0)),
+            config: Arc::new(config),
         };
 
         let handle = ServerHandle {
@@ -77,6 +93,22 @@ impl Server {
                 result = self.listener.accept() => {
                     match result {
                         Ok((socket, addr)) => {
+                            // check connection limit before accepting
+                            let current = self.active_connections.load(Ordering::Relaxed);
+                            if current >= self.config.maxconnections {
+                                counter!("lynx_connections_rejected_total").increment(1);
+                                warn!(
+                                    client_addr = %addr,
+                                    current = current,
+                                    max = self.config.maxconnections,
+                                    "connection rejected: server at capacity"
+                                );
+                                tokio::spawn(async move {
+                                    let _ = reject_connection(socket).await;
+                                });
+                                continue;
+                            }
+
                             counter!("lynx_connections_total").increment(1);
                             gauge!("lynx_connections_active").increment(1.0);
                             self.active_connections.fetch_add(1, Ordering::Relaxed);
@@ -86,9 +118,20 @@ impl Server {
                             let clients = self.clients.clone();
                             let shutdown_tx = self.shutdown_tx.clone();
                             let active_connections = self.active_connections.clone();
+                            let slow_client_threshold = self.config.slow_client_threshold;
+                            let rate_limit_per_second = self.config.rate_limit_per_second;
+                            let rate_limit_burst = self.config.rate_limit_burst;
 
                             client_tasks.spawn(async move {
-                                if let Err(e) = handle_client(socket, addr, clients, shutdown_tx).await {
+                                if let Err(e) = handle_client(
+                                    socket,
+                                    addr,
+                                    clients,
+                                    shutdown_tx,
+                                    slow_client_threshold,
+                                    rate_limit_per_second,
+                                    rate_limit_burst,
+                                ).await {
                                     error!(client_addr = %addr, error = %e, "client handler error");
                                 }
                                 gauge!("lynx_connections_active").decrement(1.0);
@@ -122,12 +165,15 @@ impl Server {
     }
 }
 
-#[instrument(skip(socket, clients, shutdown_tx), fields(client_addr = %addr))]
+#[instrument(skip(socket, clients, shutdown_tx, slow_client_threshold, rate_limit_per_second, rate_limit_burst), fields(client_addr = %addr))]
 async fn handle_client(
     socket: TcpStream,
     addr: SocketAddr,
     clients: Clients,
     shutdown_tx: broadcast::Sender<()>,
+    slow_client_threshold: usize,
+    rate_limit_per_second: f64,
+    rate_limit_burst: usize,
 ) -> Result<()> {
     debug!("handling client connection");
 
@@ -169,7 +215,17 @@ async fn handle_client(
             loop {
                 match try_extract_frame(&accumulator) {
                     Ok(Some((message, consumed))) => {
-                        if let Err(e) = process_message(&message, &mut current_username, &clients, &tx).await {
+                        if let Err(e) = process_message(
+                            &message,
+                            &mut current_username,
+                            &clients,
+                            &tx,
+                            slow_client_threshold,
+                            rate_limit_per_second,
+                            rate_limit_burst,
+                        )
+                        .await
+                        {
                             task_error = Some(e);
                             break 'main;
                         }
@@ -236,6 +292,9 @@ async fn process_message(
     current_username: &mut Option<String>,
     clients: &Clients,
     tx: &ClientSender,
+    slow_client_threshold: usize,
+    rate_limit_per_second: f64,
+    rate_limit_burst: usize,
 ) -> Result<()> {
     let processing_start = Instant::now();
 
@@ -261,6 +320,8 @@ async fn process_message(
                     ClientInfo {
                         sender: tx.clone(),
                         room: "general".to_string(),
+                        dropped_count: AtomicUsize::new(0),
+                        rate_limiter: TokenBucket::new(rate_limit_per_second, rate_limit_burst),
                     },
                 );
                 *current_username = Some(username.clone());
@@ -274,11 +335,24 @@ async fn process_message(
 
         Message::SendRoomMessage { text } => {
             if let Some(sender_username) = current_username {
+                // check rate limit
+                if let Some(info) = clients.get(sender_username)
+                    && !info.rate_limiter.try_acquire()
+                {
+                    counter!("lynx_rate_limited_total").increment(1);
+                    tx.send(Response::Error {
+                        message: "rate limited, slow down".to_string(),
+                    })
+                    .await?;
+                    return Ok(());
+                }
+
                 let sender_room = clients
                     .get(sender_username)
                     .map(|e| e.room.clone())
                     .unwrap_or_else(|| "general".to_string());
 
+                let mut slow_clients: Vec<String> = Vec::new();
                 for entry in clients.iter() {
                     if entry.room == sender_room {
                         let msg = Response::IncomingMessage {
@@ -287,8 +361,20 @@ async fn process_message(
                             room: Some(sender_room.clone()),
                         };
                         // try_send to avoid deadlock on slow consumers
-                        let _ = entry.sender.try_send(msg);
+                        if entry.sender.try_send(msg).is_err() {
+                            counter!("lynx_messages_dropped_total").increment(1);
+                            let count = entry.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+                            if count >= slow_client_threshold {
+                                slow_clients.push(entry.key().clone());
+                            }
+                        }
                     }
+                }
+                // disconnect slow clients after iteration completes
+                for username in slow_clients {
+                    clients.remove(&username);
+                    counter!("lynx_clients_slow_disconnected_total").increment(1);
+                    warn!(username = %username, "disconnecting slow client");
                 }
             } else {
                 send_not_registered_error(tx).await?;
@@ -306,6 +392,18 @@ async fn process_message(
 
         Message::SendPrivateMessage { to, text } => {
             if let Some(sender_username) = current_username {
+                // check rate limit
+                if let Some(info) = clients.get(sender_username)
+                    && !info.rate_limiter.try_acquire()
+                {
+                    counter!("lynx_rate_limited_total").increment(1);
+                    tx.send(Response::Error {
+                        message: "rate limited, slow down".to_string(),
+                    })
+                    .await?;
+                    return Ok(());
+                }
+
                 if let Some(recipient) = clients.get(to) {
                     let msg = Response::IncomingMessage {
                         from: sender_username.clone(),
@@ -313,7 +411,17 @@ async fn process_message(
                         room: None,
                     };
                     // try_send to avoid deadlock on slow consumers
-                    let _ = recipient.sender.try_send(msg);
+                    if recipient.sender.try_send(msg).is_err() {
+                        counter!("lynx_messages_dropped_total").increment(1);
+                        let count = recipient.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count >= slow_client_threshold {
+                            let recipient_name = to.clone();
+                            drop(recipient); // release the DashMap guard before remove
+                            clients.remove(&recipient_name);
+                            counter!("lynx_clients_slow_disconnected_total").increment(1);
+                            warn!(username = %recipient_name, "disconnecting slow client");
+                        }
+                    }
                 } else {
                     counter!("lynx_errors_total", "error_type" => "recipient_not_found")
                         .increment(1);
@@ -348,10 +456,11 @@ async fn process_message(
                 info!(username = %username, "client disconnected");
             }
             // ignore send error - client may already be gone
-            let _ = tx.send(Response::Success {
-                message: "goodbye".to_string(),
-            })
-            .await;
+            let _ = tx
+                .send(Response::Success {
+                    message: "goodbye".to_string(),
+                })
+                .await;
         }
     }
 
@@ -381,4 +490,15 @@ async fn send_not_registered_error(
         message: "you must connect with a username first".to_string(),
     })
     .await
+}
+
+/// send error response and close connection when server is at capacity
+async fn reject_connection(mut socket: TcpStream) -> Result<()> {
+    let response = Response::Error {
+        message: "server at capacity, try again later".to_string(),
+    };
+    let frame = encode_response(&response).map_err(|e| anyhow::anyhow!(e))?;
+    socket.write_all(&frame).await?;
+    socket.shutdown().await?;
+    Ok(())
 }

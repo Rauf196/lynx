@@ -13,7 +13,10 @@ struct ClientInfo {
 type Clients = Arc<DashMap<String, ClientInfo>>;
 
 // setup helper: create N clients in specified rooms
-fn setup_clients(total: usize, room_distribution: &[(String, usize)]) -> (Clients, Vec<mpsc::Receiver<Response>>) {
+fn setup_clients(
+    total: usize,
+    room_distribution: &[(String, usize)],
+) -> (Clients, Vec<mpsc::Receiver<Response>>) {
     let clients: Clients = Arc::new(DashMap::new());
     let mut receivers = Vec::with_capacity(total);
 
@@ -22,10 +25,13 @@ fn setup_clients(total: usize, room_distribution: &[(String, usize)]) -> (Client
         for _ in 0..*count {
             let (tx, rx) = mpsc::channel(100);
             let username = format!("user_{:05}", idx);
-            clients.insert(username, ClientInfo {
-                sender: tx,
-                room: room.clone(),
-            });
+            clients.insert(
+                username,
+                ClientInfo {
+                    sender: tx,
+                    room: room.clone(),
+                },
+            );
             receivers.push(rx);
             idx += 1;
         }
@@ -74,36 +80,30 @@ fn bench_room_filtering(c: &mut Criterion) {
     let total = 1000;
 
     // 10% in target room (100 clients), 90% elsewhere
-    let (clients_10pct, _) = setup_clients(total, &[
-        ("target".to_string(), 100),
-        ("other".to_string(), 900),
-    ]);
+    let (clients_10pct, _) = setup_clients(
+        total,
+        &[("target".to_string(), 100), ("other".to_string(), 900)],
+    );
     group.bench_function("10pct_match", |b| {
-        b.iter(|| {
-            broadcast_to_room(black_box(&clients_10pct), "target", "user_00000", "msg")
-        })
+        b.iter(|| broadcast_to_room(black_box(&clients_10pct), "target", "user_00000", "msg"))
     });
 
     // 50% in target room
-    let (clients_50pct, _) = setup_clients(total, &[
-        ("target".to_string(), 500),
-        ("other".to_string(), 500),
-    ]);
+    let (clients_50pct, _) = setup_clients(
+        total,
+        &[("target".to_string(), 500), ("other".to_string(), 500)],
+    );
     group.bench_function("50pct_match", |b| {
-        b.iter(|| {
-            broadcast_to_room(black_box(&clients_50pct), "target", "user_00000", "msg")
-        })
+        b.iter(|| broadcast_to_room(black_box(&clients_50pct), "target", "user_00000", "msg"))
     });
 
     // 90% in target room
-    let (clients_90pct, _) = setup_clients(total, &[
-        ("target".to_string(), 900),
-        ("other".to_string(), 100),
-    ]);
+    let (clients_90pct, _) = setup_clients(
+        total,
+        &[("target".to_string(), 900), ("other".to_string(), 100)],
+    );
     group.bench_function("90pct_match", |b| {
-        b.iter(|| {
-            broadcast_to_room(black_box(&clients_90pct), "target", "user_00000", "msg")
-        })
+        b.iter(|| broadcast_to_room(black_box(&clients_90pct), "target", "user_00000", "msg"))
     });
 
     group.finish();

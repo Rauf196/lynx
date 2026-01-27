@@ -21,6 +21,15 @@ pub struct Config {
 
     #[serde(default = "default_metricsport")]
     pub metricsport: u16,
+
+    #[serde(default = "default_slow_client_threshold")]
+    pub slow_client_threshold: usize,
+
+    #[serde(default = "default_rate_limit_per_second")]
+    pub rate_limit_per_second: f64,
+
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: usize,
 }
 
 // default value functions for serde
@@ -48,6 +57,18 @@ fn default_metricsport() -> u16 {
     9090
 }
 
+fn default_slow_client_threshold() -> usize {
+    50
+}
+
+fn default_rate_limit_per_second() -> f64 {
+    10.0
+}
+
+fn default_rate_limit_burst() -> usize {
+    20
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -57,6 +78,9 @@ impl Default for Config {
             loglevel: default_loglevel(),
             metricshost: default_metricshost(),
             metricsport: default_metricsport(),
+            slow_client_threshold: default_slow_client_threshold(),
+            rate_limit_per_second: default_rate_limit_per_second(),
+            rate_limit_burst: default_rate_limit_burst(),
         }
     }
 }
@@ -73,7 +97,13 @@ impl Config {
             .set_default("maxconnections", default_maxconnections() as i64)?
             .set_default("loglevel", default_loglevel())?
             .set_default("metricshost", default_metricshost())?
-            .set_default("metricsport", default_metricsport() as i64)?;
+            .set_default("metricsport", default_metricsport() as i64)?
+            .set_default(
+                "slow_client_threshold",
+                default_slow_client_threshold() as i64,
+            )?
+            .set_default("rate_limit_per_second", default_rate_limit_per_second())?
+            .set_default("rate_limit_burst", default_rate_limit_burst() as i64)?;
 
         // load from config.toml if it exists
         if Path::new("config.toml").exists() {
@@ -114,6 +144,9 @@ mod tests {
         assert_eq!(config.loglevel, "info");
         assert_eq!(config.metricshost, "127.0.0.1");
         assert_eq!(config.metricsport, 9090);
+        assert_eq!(config.slow_client_threshold, 50);
+        assert_eq!(config.rate_limit_per_second, 10.0);
+        assert_eq!(config.rate_limit_burst, 20);
     }
 
     #[test]

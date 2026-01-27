@@ -1,5 +1,5 @@
 use lynx_protocol::{Message, Response, encode_frame, try_extract_response};
-use lynx_server::{Server, ServerHandle};
+use lynx_server::{Config, Server, ServerHandle};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,7 +16,11 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
-        let (server, handle) = Server::bind("127.0.0.1:0").await.unwrap();
+        Self::start_with_config(Config::default()).await
+    }
+
+    async fn start_with_config(config: Config) -> Self {
+        let (server, handle) = Server::bind("127.0.0.1:0", config).await.unwrap();
         tokio::spawn(server.run());
         Self { handle }
     }
@@ -467,6 +471,208 @@ async fn test_connect_duplicate_username() {
     // second alice gets rejected
     let response = alice2.login("alice").await.unwrap();
     assert!(matches!(response, Response::Error { message } if message.contains("taken")));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_connection_limit_enforced() {
+    // start server with maxconnections = 2
+    let config = Config {
+        maxconnections: 2,
+        ..Config::default()
+    };
+    let server = TestServer::start_with_config(config).await;
+
+    // first two connections succeed
+    let mut client1 = TestClient::connect(server.addr()).await;
+    let mut client2 = TestClient::connect(server.addr()).await;
+
+    client1.login("alice").await.unwrap();
+    client2.login("bob").await.unwrap();
+
+    // third connection should be rejected
+    let mut client3 = TestClient::connect(server.addr()).await;
+
+    // the server sends an error response and closes the connection
+    let response = client3.recv_timeout().await.unwrap();
+    assert!(
+        matches!(&response, Response::Error { message } if message.contains("capacity")),
+        "expected capacity error, got {:?}",
+        response
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_slow_client_disconnected() {
+    // start server with low threshold for testing
+    // channel capacity is 100, threshold is 5
+    // so we need 100 + 5 = 105 messages to fill buffer and exceed threshold
+    // also disable rate limiting for this test (set high burst)
+    let config = Config {
+        slow_client_threshold: 5,
+        rate_limit_per_second: 1000.0,
+        rate_limit_burst: 200,
+        ..Config::default()
+    };
+    let server = TestServer::start_with_config(config).await;
+
+    let mut alice = TestClient::connect(server.addr()).await;
+    let mut bob = TestClient::connect(server.addr()).await;
+
+    alice.login("alice").await.unwrap();
+    let bob_login_response = bob.login("bob").await.unwrap();
+    assert!(
+        matches!(bob_login_response, Response::Success { .. }),
+        "bob login failed: {:?}",
+        bob_login_response
+    );
+
+    // verify bob is in user list before we start
+    alice.send(&Message::ListUsers).await.unwrap();
+    let response = alice.recv_timeout().await.unwrap();
+    match response {
+        Response::UserList { users } => {
+            assert!(
+                users.contains(&"bob".to_string()),
+                "bob should be in user list initially: {:?}",
+                users
+            );
+        }
+        _ => panic!("expected UserList, got {:?}", response),
+    }
+
+    // alice moves to a different room so she doesn't receive broadcasts
+    alice
+        .send(&Message::JoinRoom {
+            room_name: "alice_room".to_string(),
+        })
+        .await
+        .unwrap();
+    alice.recv_timeout().await.unwrap(); // consume success response
+
+    // bob stays in "general" - we keep the connection open but stop reading
+    // alice sends private messages to bob to fill his buffer
+    for i in 0..110 {
+        alice
+            .send(&Message::SendPrivateMessage {
+                to: "bob".to_string(),
+                text: format!("message {}", i),
+            })
+            .await
+            .unwrap();
+        // small delay to let server process
+        if i % 20 == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    // give server time to process and disconnect bob
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // alice checks user list - bob should be disconnected
+    alice.send(&Message::ListUsers).await.unwrap();
+
+    // after bob is disconnected, subsequent DMs get "recipient not found" errors
+    // we need to skip those error responses to find the UserList
+    loop {
+        let response = alice.recv_timeout().await.unwrap();
+        match response {
+            Response::UserList { users } => {
+                assert!(users.contains(&"alice".to_string()), "alice should exist");
+                assert!(
+                    !users.contains(&"bob".to_string()),
+                    "bob should have been disconnected, users: {:?}",
+                    users
+                );
+                break;
+            }
+            Response::Error { message } if message.contains("not found") => {
+                // expected - skip these errors from DMs after bob was disconnected
+                continue;
+            }
+            other => panic!("unexpected response: {:?}", other),
+        }
+    }
+
+    // bob's connection should still be open (not dropped), but he was removed from registry
+    // dropping bob here is fine
+    drop(bob);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_rate_limiting() {
+    // start server with low rate limits for testing
+    // burst=5 means first 5 messages are allowed, then rate limited
+    let config = Config {
+        rate_limit_per_second: 10.0,
+        rate_limit_burst: 5,
+        ..Config::default()
+    };
+    let server = TestServer::start_with_config(config).await;
+
+    let mut alice = TestClient::connect(server.addr()).await;
+    let mut bob = TestClient::connect(server.addr()).await;
+
+    alice.login("alice").await.unwrap();
+    bob.login("bob").await.unwrap();
+
+    // alice moves to different room so she doesn't receive her own broadcasts
+    alice
+        .send(&Message::JoinRoom {
+            room_name: "alice_room".to_string(),
+        })
+        .await
+        .unwrap();
+    alice.recv_timeout().await.unwrap(); // consume success response
+
+    // send 10 messages rapidly - first 5 should succeed, rest should be rate limited
+    for i in 0..10 {
+        alice
+            .send(&Message::SendPrivateMessage {
+                to: "bob".to_string(),
+                text: format!("message {}", i),
+            })
+            .await
+            .unwrap();
+    }
+
+    // count rate limit errors
+    let mut rate_limit_errors = 0;
+    for _ in 0..10 {
+        match timeout(Duration::from_millis(100), alice.recv()).await {
+            Ok(Ok(Response::Error { message })) if message.contains("rate limited") => {
+                rate_limit_errors += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // should have gotten some rate limit errors (not all 10 succeeded)
+    assert!(
+        rate_limit_errors > 0,
+        "expected rate limit errors, got none"
+    );
+
+    // wait for token refill (200ms = 2 tokens at 10/sec)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // should be able to send again
+    alice
+        .send(&Message::SendPrivateMessage {
+            to: "bob".to_string(),
+            text: "after wait".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // should NOT get rate limit error this time
+    // (we might not get any response if bob received the message)
+    // but at least no error should be received for this message
 
     server.shutdown();
 }

@@ -14,3 +14,12 @@ maxconnections = 1000
 # Log level: trace, debug, info, warn, error
 # Can also be set via RUST_LOG environment variable
 loglevel = "info"
+
+# Number of dropped messages before disconnecting a slow client
+slow_client_threshold = 50
+
+# Rate limit: messages per second per user
+rate_limit_per_second = 10.0
+
+# Rate limit: burst capacity (allows brief spikes above rate)
+rate_limit_burst = 20

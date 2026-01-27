@@ -1,8 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use lynx_protocol::{
-    Message, Response,
-    encode_frame, encode_response,
-    decode_frame, decode_response,
+    Message, Response, decode_frame, decode_response, encode_frame, encode_response,
     try_extract_frame, try_extract_response,
 };
 
@@ -76,9 +74,7 @@ fn bench_encode_baseline(c: &mut Criterion) {
     });
 
     // our framing (bincode + length prefix)
-    group.bench_function("with_framing", |b| {
-        b.iter(|| encode_frame(black_box(&msg)))
-    });
+    group.bench_function("with_framing", |b| b.iter(|| encode_frame(black_box(&msg))));
 
     group.finish();
 }
@@ -128,9 +124,7 @@ fn bench_encode_userlist_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode/response/user_list");
 
     for count in [10, 100, 1000] {
-        let users: Vec<String> = (0..count)
-            .map(|i| format!("user_{:04}", i))
-            .collect();
+        let users: Vec<String> = (0..count).map(|i| format!("user_{:04}", i)).collect();
         let resp = Response::UserList { users };
 
         group.bench_function(format!("{}_users", count), |b| {
@@ -147,20 +141,24 @@ fn bench_decode_messages(c: &mut Criterion) {
     // pre-encode all messages
     let frame_connect = encode_frame(&Message::Connect {
         username: USERNAME.to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_room = encode_frame(&Message::SendRoomMessage {
         text: CHAT_TEXT.to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_join = encode_frame(&Message::JoinRoom {
         room_name: ROOM_NAME.to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_private = encode_frame(&Message::SendPrivateMessage {
         to: USERNAME.to_string(),
         text: CHAT_TEXT.to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_list = encode_frame(&Message::ListUsers).unwrap();
     let frame_disconnect = encode_frame(&Message::Disconnect).unwrap();
@@ -197,19 +195,19 @@ fn bench_decode_responses(c: &mut Criterion) {
 
     let frame_success = encode_response(&Response::Success {
         message: "welcome, benchmark1!".to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_incoming = encode_response(&Response::IncomingMessage {
         from: USERNAME.to_string(),
         text: CHAT_TEXT.to_string(),
         room: Some(ROOM_NAME.to_string()),
-    }).unwrap();
+    })
+    .unwrap();
 
     // UserList at different sizes
     let users_100: Vec<String> = (0..100).map(|i| format!("user_{:04}", i)).collect();
-    let frame_userlist = encode_response(&Response::UserList {
-        users: users_100,
-    }).unwrap();
+    let frame_userlist = encode_response(&Response::UserList { users: users_100 }).unwrap();
 
     group.bench_function("success", |b| {
         b.iter(|| decode_response(black_box(&frame_success)))
@@ -232,13 +230,15 @@ fn bench_try_extract(c: &mut Criterion) {
 
     let frame_room = encode_frame(&Message::SendRoomMessage {
         text: CHAT_TEXT.to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let frame_incoming = encode_response(&Response::IncomingMessage {
         from: USERNAME.to_string(),
         text: CHAT_TEXT.to_string(),
         room: Some(ROOM_NAME.to_string()),
-    }).unwrap();
+    })
+    .unwrap();
 
     group.bench_function("message", |b| {
         b.iter(|| try_extract_frame(black_box(&frame_room)))

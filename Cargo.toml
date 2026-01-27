@@ -42,6 +42,9 @@ criterion = "0.5"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# HTTP server for health endpoints
+axum = "0.7"
+
 # CLI
 clap = { version = "4.4", features = ["derive"] }
 

@@ -1,5 +1,7 @@
 use anyhow::Result;
-use lynx_server::{Config, Server};
+use lynx_server::{Config, HealthState, Server};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -20,20 +22,33 @@ async fn main() -> Result<()> {
         port = %config.port,
         maxconnections = %config.maxconnections,
         loglevel = %config.loglevel,
+        slow_client_threshold = %config.slow_client_threshold,
+        rate_limit_per_second = %config.rate_limit_per_second,
+        rate_limit_burst = %config.rate_limit_burst,
         "configuration loaded"
     );
 
-    lynx_server::metrics::init(&config.metrics_address())
-        .map_err(|e| anyhow::anyhow!("metrics init failed: {}", e))?;
-    info!(metrics_address = %config.metrics_address(), "metrics server started");
-
-    let (server, handle) = Server::bind(&config.address()).await?;
+    let (server, handle) = Server::bind(&config.address(), config.clone()).await?;
     info!(address = %handle.local_addr, "server bound");
+
+    // create health state for health endpoints
+    let accepting = Arc::new(AtomicBool::new(true));
+    let health_state = Arc::new(HealthState {
+        active_connections: server.active_connections(),
+        max_connections: server.max_connections(),
+        accepting: accepting.clone(),
+    });
+
+    lynx_server::metrics::init_with_health(&config.metrics_address(), health_state)
+        .await
+        .map_err(|e| anyhow::anyhow!("metrics init failed: {}", e))?;
+    info!(metrics_address = %config.metrics_address(), "metrics and health server started");
 
     // spawn signal handler to trigger shutdown
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             info!("ctrl+c received, initiating shutdown");
+            accepting.store(false, std::sync::atomic::Ordering::Relaxed);
             handle.shutdown();
         }
     });

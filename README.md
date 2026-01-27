@@ -74,6 +74,10 @@ See [docs/benchmark/BENCHMARKS.md](docs/benchmark/BENCHMARKS.md) for detailed re
 - **Graceful Shutdown** - Clean disconnect notifications to all clients
 - **Prometheus Metrics** - Active connections, message throughput, latency histograms
 - **Layered Configuration** - Defaults → config.toml → environment variables
+- **Connection Limits** - Configurable max connections with graceful rejection
+- **Rate Limiting** - Per-user token bucket rate limiting to prevent spam
+- **Backpressure Handling** - Automatic disconnection of slow clients
+- **Health Endpoints** - `/health` and `/ready` endpoints for orchestration
 
 ## Quick Start
 
@@ -111,14 +115,14 @@ cargo run -p lynx-server --release --example chat_client
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        lynx-server                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ TcpListener │→ │ handle_client│→ │ process_message     │  │
-│  │ (accept)    │  │ (per client) │  │ (Connect, Send, etc)│  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│                          ↓                                   │
+│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐│
+│  │ TcpListener │→ │handle_client│→ │ process_message       ││
+│  │ (accept)    │  │ (per client)│  │ (Connect, Send, etc)  ││
+│  └─────────────┘  └─────────────┘  └───────────────────────┘│
+│                          ↓                                  │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │              DashMap<username, ClientInfo>              ││
-│  │                (concurrent client registry)              ││
+│  │                (concurrent client registry)             ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 
@@ -172,6 +176,11 @@ log_level = "info"
 max_connections = 100000
 metrics_host = "127.0.0.1"
 metrics_port = 9090
+
+# resource management
+slow_client_threshold = 50      # dropped messages before disconnect
+rate_limit_per_second = 10.0    # messages per second per user
+rate_limit_burst = 20           # burst capacity
 ```
 
 Environment variables (override config file):
@@ -182,19 +191,36 @@ LYNX_LOGLEVEL=debug
 LYNX_MAXCONNECTIONS=50000
 LYNX_METRICSHOST=0.0.0.0
 LYNX_METRICSPORT=9090
+
+# resource management
+LYNX_SLOW_CLIENT_THRESHOLD=50
+LYNX_RATE_LIMIT_PER_SECOND=10.0
+LYNX_RATE_LIMIT_BURST=20
 ```
 
-## Metrics
+## Metrics & Health
 
-Prometheus metrics exposed at `http://localhost:9090/metrics`:
+Prometheus metrics and health endpoints exposed at `http://localhost:9090`:
 
+**Health Endpoints:**
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Liveness check - always returns 200 OK |
+| `GET /ready` | Readiness check - 200 if accepting, 503 if at capacity or shutting down |
+| `GET /metrics` | Prometheus metrics |
+
+**Metrics:**
 | Metric | Type | Description |
 |--------|------|-------------|
 | `lynx_connections_active` | Gauge | Current active connections |
 | `lynx_connections_total` | Counter | Total connections since start |
+| `lynx_connections_rejected_total` | Counter | Connections rejected at capacity |
 | `lynx_messages_processed_total` | Counter | Messages by type |
+| `lynx_messages_dropped_total` | Counter | Messages dropped to slow clients |
 | `lynx_message_processing_duration_seconds` | Histogram | Processing latency |
 | `lynx_errors_total` | Counter | Errors by type |
+| `lynx_clients_slow_disconnected_total` | Counter | Slow clients disconnected |
+| `lynx_rate_limited_total` | Counter | Messages rejected by rate limiter |
 
 ## Load Testing
 
@@ -239,9 +265,10 @@ lynx/
 │   │   ├── main.rs       # Entry point
 │   │   ├── server.rs     # Connection handling
 │   │   ├── config.rs     # Configuration
-│   │   └── metrics.rs    # Prometheus setup
+│   │   ├── metrics.rs    # Prometheus + health endpoints (axum)
+│   │   └── rate_limiter.rs # Token bucket rate limiter
 │   ├── tests/
-│   │   └── integration.rs # 13 integration tests
+│   │   └── integration.rs # 16 integration tests
 │   ├── benches/
 │   │   └── broadcast.rs  # Broadcast scaling benchmarks
 │   └── examples/
@@ -257,7 +284,7 @@ lynx/
 ## Testing
 
 ```bash
-# Run all tests (25 tests, ~80% coverage)
+# Run all tests (27 tests, ~80% coverage)
 cargo test --workspace
 
 # Run with output
@@ -277,7 +304,7 @@ cargo bench -p lynx-server -- "broadcast/"
 - [x] Phase 2: Core server, room-based chat
 - [x] Phase 3: Metrics, configuration, graceful shutdown
 - [x] Phase 4: Integration tests, load tests, profiling, benchmarking
-- [ ] Phase 5: Resource management (connection limits, rate limiting)
+- [x] Phase 5: Resource management (connection limits, rate limiting, health endpoints)
 - [ ] Phase 6: CI/CD, Docker, documentation polish
 
 ## License
