@@ -86,8 +86,9 @@ impl Default for Config {
 }
 
 impl Config {
-    // load config from: defaults -> config.toml -> env vars (LYNX_*)
-    pub fn load() -> Result<Self, ConfigError> {
+    /// load config from: defaults -> config file -> env vars (LYNX_*)
+    /// if config_path is None, uses "config.toml" if it exists
+    pub fn load(config_path: Option<&str>) -> Result<Self, ConfigError> {
         let mut builder = ConfigBuilder::builder();
 
         // set defaults
@@ -105,9 +106,18 @@ impl Config {
             .set_default("rate_limit_per_second", default_rate_limit_per_second())?
             .set_default("rate_limit_burst", default_rate_limit_burst() as i64)?;
 
-        // load from config.toml if it exists
-        if Path::new("config.toml").exists() {
-            builder = builder.add_source(File::with_name("config"));
+        // load from config file
+        match config_path {
+            Some(path) => {
+                // explicit path provided - must exist
+                builder = builder.add_source(File::with_name(path));
+            }
+            None => {
+                // default: use config.toml if it exists
+                if Path::new("config.toml").exists() {
+                    builder = builder.add_source(File::with_name("config"));
+                }
+            }
         }
 
         // override with env vars (LYNX_HOST, LYNX_PORT, etc.)

@@ -1,14 +1,42 @@
 use anyhow::Result;
+use clap::Parser;
 use lynx_server::{Config, HealthState, Server};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+#[derive(Parser, Debug)]
+#[command(name = "lynx-server")]
+#[command(about = "High-performance TCP chat server")]
+struct Args {
+    /// path to config file (default: config.toml if exists)
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// server port (overrides config file and env var)
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// log level: trace, debug, info, warn, error (overrides config file and env var)
+    #[arg(short, long)]
+    log_level: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
     let _ = dotenvy::dotenv();
-    let config = Config::load()?;
+
+    let mut config = Config::load(args.config.as_deref())?;
+
+    // CLI args override config
+    if let Some(port) = args.port {
+        config.port = port;
+    }
+    if let Some(ref level) = args.log_level {
+        config.loglevel = level.clone();
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -6,7 +6,7 @@ use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load()?;
+    let config = Config::load(None)?;
 
     // ask for username
     print!("Enter username: ");

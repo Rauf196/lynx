@@ -79,7 +79,7 @@ See [docs/benchmark/BENCHMARKS.md](docs/benchmark/BENCHMARKS.md) for detailed re
 - **Private Messaging** - Direct messages between users
 - **Graceful Shutdown** - Clean disconnect notifications to all clients
 - **Prometheus Metrics** - Active connections, message throughput, latency histograms
-- **Layered Configuration** - Defaults → config.toml → environment variables
+- **Layered Configuration** - CLI args → env vars → config.toml → defaults
 - **Connection Limits** - Configurable max connections with graceful rejection
 - **Rate Limiting** - Per-user token bucket rate limiting to prevent spam
 - **Backpressure Handling** - Automatic disconnection of slow clients
@@ -106,6 +106,17 @@ cargo run -p lynx-server --release
 # In another terminal, run the example client
 cargo run -p lynx-server --release --example chat_client
 ```
+
+### Server CLI Options
+
+```bash
+lynx-server --help                     # Show all options
+lynx-server --port 8080                # Override port
+lynx-server --log-level debug          # Override log level
+lynx-server --config /path/to/cfg.toml # Use custom config file
+```
+
+**Priority:** CLI args → env vars → config.toml → defaults
 
 ### Client Commands
 

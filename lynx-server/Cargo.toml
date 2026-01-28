@@ -12,6 +12,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 dotenvy = { workspace = true }
 config = { workspace = true }
+clap = { workspace = true }
 
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
