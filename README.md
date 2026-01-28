@@ -16,6 +16,12 @@
   <a href="#configuration">Configuration</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/Rauf196/lynx/actions/workflows/ci.yml">
+    <img src="https://github.com/Rauf196/lynx/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
+
 ---
 
 ## What is Lynx?

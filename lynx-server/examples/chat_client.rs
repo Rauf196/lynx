@@ -206,10 +206,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     // encode and send
-                    if let Ok(frame) = encode_frame(&msg) {
-                        if write_half.write_all(&frame).await.is_err() {
-                            break;
-                        }
+                    if let Ok(frame) = encode_frame(&msg)
+                        && write_half.write_all(&frame).await.is_err()
+                    {
+                        break;
                     }
                 }
                 Err(_) => break,
