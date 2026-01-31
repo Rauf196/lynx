@@ -32,24 +32,133 @@ Built for learning production-grade async Rust patterns.
 
 ## Performance
 
-Tested on a single machine (Linux, Intel):
+Server and load tester on same machine. Latency measured via Prometheus/Grafana (docker-compose).
 
-| Clients | Connected | Throughput | Notes |
-|---------|-----------|------------|-------|
-| 10,000 | 10,000 | 33,700 msg/s | Clean run |
-| 25,000 | 25,000 | 21,000 msg/s | Near port limit |
-| 50,000 | 50,000 | 18,500 msg/s | Port recycling |
-| 70,000 | 70,000 | 16,100 msg/s | Port recycling |
+### Laptop: ThinkPad X1 Carbon 6th Gen (i7-8550U, 16GB RAM)
 
+| Ramp Speed | Spawn Rate | Spawned | Peak Concurrent | Throughput | p50 | p95 | p99 | Result |
+|------------|------------|---------|-----------------|------------|-----|-----|-----|--------|
+| Fast | 1000/sec | 5,000 | 5,000 | 6,915 msg/s | 166µs | 1.72ms | 9.70ms | Clean |
+| Fast | 1000/sec | 10,000 | 10,000 | 10,204 msg/s | 169µs | 1.38ms | 6.82ms | Clean |
+| Fast | 1000/sec | 15,000 | 14,000 | 11,794 msg/s | 188µs | 1.65ms | 100ms | Clean |
+| Fast | 1000/sec | 19,000 | 18,000 | 16,588 msg/s | - | - | - | Clean |
+| Fast | 1000/sec | 22,000 | 18,750 | - | - | - | - | Crashed |
+| Medium | 250/sec | 25,000 | 22,500 | 10,628 msg/s | 330µs | 2.48ms | 100ms | Clean |
+| Slow | 125/sec | 25,000 | 24,000 | - | 440µs | 2.94ms | 8.12ms | Clean |
+
+**Limits:**
+
+| Ramp Speed | Spawn Rate | Max Stable | Crash Point | Limiting Factor |
+|------------|------------|------------|-------------|-----------------|
+| Fast | 1000/sec | ~18k | ~19k | Connection burst pressure |
+| Medium | 250/sec | ~23k | ~24k | Memory + burst |
+| Slow | 125/sec | ~24k | ~25k | CPU saturation (99%) |
+
+### PC: Windows WSL2 (Ryzen 5 7600X @ 5.3GHz, 24GB RAM to WSL)
+
+**Native (no docker-compose, no latency data):**
+
+| Ramp Speed | Spawn Rate | Spawned | Peak Concurrent | Throughput | Result |
+|------------|------------|---------|-----------------|------------|--------|
+| Slow | 125/sec | 35,000 | 28,000 | 14,595 msg/s | Clean (port-limited) |
+| Slow | 125/sec | 45,000 | 42,500 | 10,830 msg/s | Clean (after expanding ports) |
+
+The 28k → 42.5k jump came from expanding the ephemeral port range:
 ```bash
-# Test command used (rooms = clients/100)
-cargo run -p lynx-load --release -- -c <clients> -r <rooms> -m 50 --batch-size 50 --batch-delay-ms 50
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
 ```
 
-**Server configuration affecting performance:**
-- Per-client channel buffer: 100 messages (broadcasts use `try_send`, drops on full)
-- Read buffer: 4KB per client
-- Accumulator: 8KB initial capacity
+**With docker-compose (Prometheus + Grafana monitoring):**
+
+| Ramp Speed | Spawn Rate | Spawned | Peak Concurrent | Throughput | p50 | p95 | p99 | Result |
+|------------|------------|---------|-----------------|------------|-----|-----|-----|--------|
+| Slow | 125/sec | 45,000 | 41,000 | 10,505 msg/s | 410µs | 3.5ms | 100ms | Clean |
+
+Latency at non-peak: p50=337µs, p95=2ms, p99=5.4ms. Docker adds ~3% overhead vs native.
+
+### Key Insights
+
+- **Connection burst rate matters:** Slower ramp allows 33% more connections and 12x better p99 latency (8ms vs 100ms)
+- **Hardware scales linearly:** 42.5k on 24GB/6-core vs 24k on 16GB/4-core
+- **Know your limits:** Port range (\~28k default), RAM (\~700KB per connection at peak), and CPU all cap concurrency
+- **Memory behavior:** Server retains ~7GB after 42k test (buffers not returned to OS, not a leak)
+
+### Network Test (Cross-Machine)
+
+Load tester on Windows PC (32GB RAM) → Server on Linux laptop over 100Mbps ethernet:
+
+| Concurrent | Throughput | p50 | p95 | p99 | Result |
+|------------|------------|-----|-----|-----|--------|
+| 12,467 | 6,962 msg/s | 340µs | 1.61ms | 4.25ms | Crashed |
+
+**Finding:** 100Mbps network became the bottleneck, not the server. Same test locally reached 18k+ concurrent.
+
+### Throughput (Total Connections Over Time)
+
+Short-lived connections (1 sec lifetime) to test connection handling without accumulating state:
+
+| Total Clients | Duration | Peak In-Flight | Result |
+|---------------|----------|----------------|--------|
+| 70,000 | 73s | ~1k | Clean |
+| 90,000+ | 158s | ~20-30k | Port exhaustion |
+
+### Memory Behavior
+
+| Scenario | RAM Usage | Notes |
+|----------|-----------|-------|
+| 70k short-lived (1s) | ~70MB | Minimal growth |
+| 13k long-lived (100s) | 3GB → 14GB | Accumulated message queues |
+
+**Key insight:** Memory scales with `concurrent clients × message rate × client lifetime`, not just connection count. Each client has a channel buffer (100 messages), and broadcast messages multiply across recipients.
+
+### Load Test Math
+
+Understanding how to calculate max concurrent connections:
+
+```
+Spawn rate     = batch_size / batch_delay_ms
+Client lifetime = messages × send_interval_ms
+Max concurrent  = spawn_rate × lifetime
+```
+
+**Example (fast ramp):**
+- `--batch-size 50 --batch-delay-ms 50` → 1000 clients/sec
+- `-m 60 --send-interval-ms 500` → 30 second lifetime
+- Max concurrent: 1000 × 30 = **30,000** (or total clients, whichever is lower)
+
+**Example (slow ramp):**
+- `--batch-size 25 --batch-delay-ms 200` → 125 clients/sec
+- `-m 200 --send-interval-ms 1000` → 200 second lifetime
+- Max concurrent: 125 × 200 = **25,000**
+
+Slow ramp reduces connection burst pressure, allowing higher peak concurrent.
+
+### Load Test Commands
+
+```bash
+# Fast ramp - find crash threshold
+cargo run -p lynx-load --release -- -c 20000 -r 200 -m 60 \
+  --batch-size 50 --batch-delay-ms 50 --send-interval-ms 500 --dm-pct 0
+
+# Slow ramp - find stable maximum
+cargo run -p lynx-load --release -- -c 30000 -r 300 -m 150 \
+  --batch-size 50 --batch-delay-ms 200 --send-interval-ms 1000 --dm-pct 0
+
+# Throughput test (short-lived connections)
+cargo run -p lynx-load --release -- -c 70000 -r 700 -m 10 \
+  --batch-size 50 --batch-delay-ms 50 --send-interval-ms 100 --dm-pct 0
+```
+
+### Why Not 100k Concurrent?
+
+100k simultaneous connections on a single server isn't realistic:
+
+1. **Port exhaustion:** ~28k ephemeral ports per machine for load tester
+2. **RAM:** 100k connections × ~100KB each = 10GB minimum, plus message buffers
+3. **Single runtime:** All connections share one Tokio async runtime
+4. **Broadcast multiplication:** 1 message to 100-client room = 100 channel sends
+
+Production systems like Discord handle scale through horizontal sharding, message queues (pub/sub), gateway proxies, and distributed architecture. This server demonstrates solid single-process async Rust performance—the foundation that would be replicated across a cluster.
 
 **Profiling results:** Server is I/O bound (37% in kernel `sendto`), with no application-level bottlenecks. Tokio runtime overhead is ~1%. See [profiling details](docs/profiling/RESULTS.md).
 
@@ -89,7 +198,7 @@ See [docs/benchmark/BENCHMARKS.md](docs/benchmark/BENCHMARKS.md) for detailed re
 
 ### Prerequisites
 
-- Rust 1.75+ (2024 edition)
+- Rust 1.85+ (2024 edition)
 - Linux recommended for load testing
 
 ### Run the Server
@@ -262,7 +371,7 @@ For load tests above 1K clients:
 
 ```bash
 # Increase file descriptor limit (run in BOTH server and client terminals)
-ulimit -n 65536
+ulimit -n 100000
 
 # Check current limits
 ulimit -n        # Soft limit
@@ -270,7 +379,26 @@ ulimit -Hn       # Hard limit
 
 # Verify TCP settings
 cat /proc/sys/net/core/somaxconn           # Should be 65535
-cat /proc/sys/net/ipv4/ip_local_port_range # Ephemeral ports
+cat /proc/sys/net/ipv4/ip_local_port_range # Ephemeral ports (default ~28k)
+```
+
+For load tests above 28K clients (expand ephemeral port range):
+
+```bash
+# Expand port range from ~28k to ~64k ports
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+
+# Verify
+cat /proc/sys/net/ipv4/ip_local_port_range
+```
+
+### Monitoring During Tests
+
+```bash
+# Watch active connections in real-time
+watch -n1 'curl -s localhost:9090/metrics | grep lynx_connections_active'
+
+# Or with docker-compose, open Grafana at http://localhost:3000
 ```
 
 ## Project Structure
@@ -322,7 +450,7 @@ cargo bench -p lynx-server -- "broadcast/"
 - [x] Phase 3: Metrics, configuration, graceful shutdown
 - [x] Phase 4: Integration tests, load tests, profiling, benchmarking
 - [x] Phase 5: Resource management (connection limits, rate limiting, health endpoints)
-- [ ] Phase 6: CI/CD, Docker, documentation polish
+- [x] Phase 6: CI/CD, Docker, Grafana dashboard, CLI args
 
 ## License
 

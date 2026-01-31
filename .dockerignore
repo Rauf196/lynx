@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+docs/
+*.md
+.env
+config.toml
