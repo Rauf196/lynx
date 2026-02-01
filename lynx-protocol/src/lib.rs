@@ -1,59 +1,113 @@
+//! Binary protocol for the Lynx chat server.
+//!
+//! This crate defines the wire protocol used between clients and the server.
+//! Messages are length-prefixed binary frames using bincode serialization.
+//!
+//! # Frame Format
+//!
+//! ```text
+//! +----------------+------------------+
+//! | length (4 bytes, big-endian u32) |
+//! +----------------+------------------+
+//! | payload (bincode-serialized)     |
+//! +----------------------------------+
+//! ```
+//!
+//! # Usage
+//!
+//! ```
+//! use lynx_protocol::{Message, Response, encode_frame, try_extract_frame};
+//!
+//! // encode a message
+//! let msg = Message::Connect { username: "alice".into() };
+//! let frame = encode_frame(&msg).unwrap();
+//!
+//! // decode using accumulator pattern (handles partial reads)
+//! if let Ok(Some((message, consumed))) = try_extract_frame(&frame) {
+//!     // process message, drain consumed bytes from buffer
+//! }
+//! ```
+
 use serde::{Deserialize, Serialize};
 
+/// Messages sent from client to server.
+///
+/// Each variant represents a distinct action a client can perform.
+/// The server responds with a [`Response`] after processing.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
-    // client wants to register with username
+    /// Register with the server using a username.
+    ///
+    /// Must be the first message sent. Username must be unique.
+    /// Server responds with `Success` or `Error` (if username taken).
     Connect { username: String },
 
-    // client sends a message to current room
+    /// Send a message to the client's current room.
+    ///
+    /// Broadcasts to all users in the same room.
+    /// Client must be connected first.
     SendRoomMessage { text: String },
 
-    // client joins a room
+    /// Join a chat room.
+    ///
+    /// Switches the client's active room. Default room is "general".
     JoinRoom { room_name: String },
 
-    // client sends private message to another client
+    /// Send a private message to another user.
+    ///
+    /// Delivered only to the recipient. Returns error if user not found.
     SendPrivateMessage { to: String, text: String },
 
-    // request list of online users
+    /// Request list of all online users.
+    ///
+    /// Server responds with `UserList`.
     ListUsers,
 
-    // client disconnects
+    /// Gracefully disconnect from the server.
     Disconnect,
 }
 
+/// Responses sent from server to client.
+///
+/// Clients should handle all variants, as the server may push messages
+/// asynchronously (e.g., `IncomingMessage` from other users).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Response {
-    // generic success
-    Success {
-        message: String,
-    },
+    /// Operation completed successfully.
+    Success { message: String },
 
-    // something went wrong
-    Error {
-        message: String,
-    },
+    /// Operation failed with an error message.
+    Error { message: String },
 
-    // list of online users
-    UserList {
-        users: Vec<String>,
-    },
+    /// List of currently online usernames.
+    ///
+    /// Sent in response to [`Message::ListUsers`].
+    UserList { users: Vec<String> },
 
-    // someone sent a message
+    /// Incoming chat message from another user.
+    ///
+    /// - `room: Some(name)` - room message
+    /// - `room: None` - private/direct message
     IncomingMessage {
         from: String,
         text: String,
-        room: Option<String>, // None if private message
+        room: Option<String>,
     },
 
-    // system notification
-    SystemNotification {
-        text: String,
-    },
+    /// System notification (e.g., shutdown warning).
+    SystemNotification { text: String },
 }
 
-/// Encodes a message into a length-prefixed frame.
+/// Encodes a [`Message`] into a length-prefixed binary frame.
 ///
-/// Returns a Vec<u8> with format: [4 bytes length][message bytes]
+/// # Returns
+///
+/// A `Vec<u8>` containing: `[4-byte big-endian length][bincode payload]`
+///
+/// # Errors
+///
+/// Returns an error if bincode serialization fails (should not happen
+/// with valid `Message` variants).
 pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, String> {
     // serialize message to bytes
     let msg_bytes = bincode::serialize(msg).map_err(|e| format!("serialization failed: {}", e))?;
@@ -70,9 +124,18 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
-/// Decodes a length-prefixed frame into a message.
+/// Decodes a length-prefixed binary frame into a [`Message`].
 ///
-/// Expects format: [4 bytes length][message bytes]
+/// # Errors
+///
+/// - `"not enough bytes for length"` - fewer than 4 bytes provided
+/// - `"incomplete message"` - length header indicates more bytes than available
+/// - `"deserialization failed: ..."` - payload is not a valid `Message`
+///
+/// # Note
+///
+/// For streaming sockets, prefer [`try_extract_frame`] which handles
+/// partial reads gracefully.
 pub fn decode_frame(bytes: &[u8]) -> Result<Message, String> {
     if bytes.len() < 4 {
         return Err("not enough bytes for length".to_string());
@@ -99,9 +162,15 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Message, String> {
     Ok(message)
 }
 
-/// Encodes a response into a length-prefixed frame.
+/// Encodes a [`Response`] into a length-prefixed binary frame.
 ///
-/// Returns a Vec<u8> with format: [4 bytes length][response bytes]
+/// # Returns
+///
+/// A `Vec<u8>` containing: `[4-byte big-endian length][bincode payload]`
+///
+/// # Errors
+///
+/// Returns an error if bincode serialization fails.
 pub fn encode_response(resp: &Response) -> Result<Vec<u8>, String> {
     // serialize response to bytes
     let resp_bytes =
@@ -119,9 +188,18 @@ pub fn encode_response(resp: &Response) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
-/// Decodes a length-prefixed frame into a response.
+/// Decodes a length-prefixed binary frame into a [`Response`].
 ///
-/// Expects format: [4 bytes length][response bytes]
+/// # Errors
+///
+/// - `"not enough bytes for length"` - fewer than 4 bytes provided
+/// - `"incomplete response"` - length header indicates more bytes than available
+/// - `"deserialization failed: ..."` - payload is not a valid `Response`
+///
+/// # Note
+///
+/// For streaming sockets, prefer [`try_extract_response`] which handles
+/// partial reads gracefully.
 pub fn decode_response(bytes: &[u8]) -> Result<Response, String> {
     if bytes.len() < 4 {
         return Err("not enough bytes for length".to_string());
@@ -148,10 +226,41 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, String> {
     Ok(response)
 }
 
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
+/// Maximum allowed message size (1 MB).
+///
+/// Messages larger than this are rejected to prevent memory exhaustion attacks.
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// extracts a complete message from accumulator buffer.
-/// returns Ok(None) if incomplete, Ok(Some((msg, bytes_consumed))) if complete.
+/// Attempts to extract a complete [`Message`] from an accumulator buffer.
+///
+/// This implements the accumulator pattern for streaming sockets, handling
+/// partial reads and multiple messages in a single buffer.
+///
+/// # Returns
+///
+/// - `Ok(None)` - not enough bytes yet, keep reading
+/// - `Ok(Some((message, consumed)))` - message extracted, drain `consumed` bytes
+/// - `Err(...)` - malformed data, connection should be closed
+///
+/// # Example
+///
+/// ```
+/// use lynx_protocol::try_extract_frame;
+///
+/// let mut accumulator = Vec::new();
+/// // ... read bytes into accumulator ...
+///
+/// loop {
+///     match try_extract_frame(&accumulator) {
+///         Ok(Some((msg, consumed))) => {
+///             // handle msg
+///             accumulator.drain(..consumed);
+///         }
+///         Ok(None) => break, // need more data
+///         Err(e) => panic!("protocol error: {}", e),
+///     }
+/// }
+/// ```
 pub fn try_extract_frame(bytes: &[u8]) -> Result<Option<(Message, usize)>, String> {
     if bytes.len() < 4 {
         return Ok(None);
@@ -174,7 +283,16 @@ pub fn try_extract_frame(bytes: &[u8]) -> Result<Option<(Message, usize)>, Strin
     Ok(Some((message, total_frame_size)))
 }
 
-/// same as try_extract_frame but for Response (client-side).
+/// Attempts to extract a complete [`Response`] from an accumulator buffer.
+///
+/// Client-side equivalent of [`try_extract_frame`]. See that function
+/// for usage pattern.
+///
+/// # Returns
+///
+/// - `Ok(None)` - not enough bytes yet, keep reading
+/// - `Ok(Some((response, consumed)))` - response extracted, drain `consumed` bytes
+/// - `Err(...)` - malformed data
 pub fn try_extract_response(bytes: &[u8]) -> Result<Option<(Response, usize)>, String> {
     if bytes.len() < 4 {
         return Ok(None);

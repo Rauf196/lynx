@@ -1,3 +1,5 @@
+//! Core server implementation.
+
 use crate::Config;
 use crate::rate_limiter::TokenBucket;
 use anyhow::Result;
@@ -17,6 +19,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 type ClientSender = mpsc::Sender<Response>;
 
+/// per-client state stored in the registry.
 struct ClientInfo {
     sender: ClientSender,
     room: String,
@@ -26,17 +29,54 @@ struct ClientInfo {
 
 type Clients = Arc<DashMap<String, ClientInfo>>;
 
+/// Handle for controlling a running server.
+///
+/// Returned by [`Server::bind`] alongside the server instance.
+/// Use this to get the bound address or trigger shutdown.
 pub struct ServerHandle {
+    /// The socket address the server is listening on.
+    ///
+    /// Useful when binding to port 0 (ephemeral port) to discover
+    /// the actual assigned port.
     pub local_addr: SocketAddr,
     shutdown_tx: broadcast::Sender<()>,
 }
 
 impl ServerHandle {
+    /// Triggers graceful shutdown of the server.
+    ///
+    /// The server will:
+    /// 1. Stop accepting new connections
+    /// 2. Notify all connected clients
+    /// 3. Wait for client tasks to complete
+    /// 4. Return from [`Server::run`]
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }
 }
 
+/// The Lynx chat server.
+///
+/// Handles TCP connections, message routing, and client lifecycle.
+///
+/// # Example
+///
+/// ```no_run
+/// use lynx_server::{Config, Server};
+///
+/// # async fn example() -> std::io::Result<()> {
+/// let (server, handle) = Server::bind("127.0.0.1:6006", Config::default()).await?;
+///
+/// // run until shutdown
+/// tokio::spawn(async move {
+///     server.run().await.unwrap();
+/// });
+///
+/// // later: trigger shutdown
+/// handle.shutdown();
+/// # Ok(())
+/// # }
+/// ```
 pub struct Server {
     listener: TcpListener,
     clients: Clients,
@@ -46,17 +86,26 @@ pub struct Server {
 }
 
 impl Server {
-    /// get a clone of the active connections counter for health checks.
+    /// Returns a shared reference to the active connection counter.
+    ///
+    /// Used by health check endpoints to report server capacity.
     pub fn active_connections(&self) -> Arc<AtomicUsize> {
         self.active_connections.clone()
     }
 
-    /// get the max connections limit from config.
+    /// Returns the maximum allowed connections from config.
     pub fn max_connections(&self) -> usize {
         self.config.maxconnections
     }
 
-    /// bind to address. use port 0 for ephemeral port.
+    /// Binds the server to a TCP address.
+    ///
+    /// Use port 0 to let the OS assign an ephemeral port (useful for testing).
+    /// The actual bound address is available via `ServerHandle::local_addr`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address cannot be bound (e.g., port in use).
     pub async fn bind(addr: &str, config: Config) -> io::Result<(Self, ServerHandle)> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
@@ -79,7 +128,14 @@ impl Server {
         Ok((server, handle))
     }
 
-    /// run until shutdown is triggered via handle.shutdown()
+    /// Runs the server until shutdown is triggered.
+    ///
+    /// This method consumes the server and blocks until:
+    /// 1. [`ServerHandle::shutdown`] is called, or
+    /// 2. An unrecoverable error occurs
+    ///
+    /// During graceful shutdown, the server waits for all client
+    /// tasks to complete before returning.
     pub async fn run(self) -> Result<()> {
         let mut client_tasks: JoinSet<()> = JoinSet::new();
 

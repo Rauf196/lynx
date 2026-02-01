@@ -1,4 +1,22 @@
-//! prometheus metrics and health endpoints for lynx server.
+//! Prometheus metrics and health endpoints.
+//!
+//! Exposes an HTTP server with:
+//! - `GET /metrics` - Prometheus metrics in text format
+//! - `GET /health` - Liveness probe (always 200 OK)
+//! - `GET /ready` - Readiness probe (503 if shutting down or at capacity)
+//!
+//! # Metrics
+//!
+//! | Metric | Type | Description |
+//! |--------|------|-------------|
+//! | `lynx_connections_active` | Gauge | Current active connections |
+//! | `lynx_connections_total` | Counter | Total connections since start |
+//! | `lynx_messages_processed_total` | Counter | Messages by type |
+//! | `lynx_message_processing_duration_seconds` | Histogram | Processing latency |
+//! | `lynx_errors_total` | Counter | Errors by type |
+//! | `lynx_connections_rejected_total` | Counter | Rejected (at capacity) |
+//! | `lynx_messages_dropped_total` | Counter | Dropped to slow clients |
+//! | `lynx_rate_limited_total` | Counter | Rate-limited messages |
 
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge};
@@ -7,16 +25,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-// Custom histogram buckets for sub-millisecond chat latency (in seconds)
-// 100us, 200us, 500us, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms
+/// custom histogram buckets for sub-millisecond latency (100µs to 100ms).
 const LATENCY_BUCKETS: &[f64] = &[
     0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1,
 ];
 
-/// shared state for health endpoints.
+/// Shared state for health check endpoints.
+///
+/// Passed to [`init_with_health`] to enable readiness checks.
 pub struct HealthState {
+    /// Current active connection count.
     pub active_connections: Arc<AtomicUsize>,
+    /// Maximum allowed connections.
     pub max_connections: usize,
+    /// Whether the server is accepting new connections.
     pub accepting: Arc<AtomicBool>,
 }
 
@@ -26,8 +48,20 @@ struct AppState {
     health_state: Arc<HealthState>,
 }
 
-/// initialize prometheus metrics and start HTTP server with health endpoints.
-/// exposes: GET /metrics, GET /health, GET /ready
+/// Initializes Prometheus metrics and starts the HTTP endpoint server.
+///
+/// Spawns a background Tokio task to serve requests. The server runs
+/// until the Tokio runtime shuts down.
+///
+/// # Endpoints
+///
+/// - `GET /metrics` - Prometheus metrics
+/// - `GET /health` - Always returns 200 (liveness probe)
+/// - `GET /ready` - Returns 200 if accepting, 503 if at capacity or shutting down
+///
+/// # Errors
+///
+/// Returns an error if the address cannot be bound.
 pub async fn init_with_health(
     addr: &str,
     health_state: Arc<HealthState>,

@@ -1,9 +1,33 @@
-//! token bucket rate limiter for per-client message throttling.
+//! Token bucket rate limiter for per-client message throttling.
+//!
+//! Implements the token bucket algorithm using lock-free atomics.
+//! Each client gets their own bucket, allowing bursts up to the
+//! configured capacity while enforcing a long-term rate limit.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// thread-safe token bucket rate limiter.
+/// Thread-safe token bucket rate limiter.
+///
+/// Tokens are consumed on each request and refill over time.
+/// Uses lock-free CAS operations for high concurrency.
+///
+/// # Example
+///
+/// ```
+/// use lynx_server::rate_limiter::TokenBucket;
+///
+/// // 10 requests/sec, burst of 5
+/// let limiter = TokenBucket::new(10.0, 5);
+///
+/// // first 5 requests succeed (burst)
+/// for _ in 0..5 {
+///     assert!(limiter.try_acquire());
+/// }
+///
+/// // 6th request is rate limited
+/// assert!(!limiter.try_acquire());
+/// ```
 pub struct TokenBucket {
     tokens: AtomicU32,
     last_refill_ms: AtomicU64,
@@ -12,7 +36,12 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
-    /// create a new token bucket with given rate and burst capacity.
+    /// Creates a new token bucket.
+    ///
+    /// # Arguments
+    ///
+    /// * `rate_per_second` - Token refill rate
+    /// * `burst` - Maximum tokens (initial and cap)
     pub fn new(rate_per_second: f64, burst: usize) -> Self {
         Self {
             tokens: AtomicU32::new(burst as u32),
@@ -29,7 +58,14 @@ impl TokenBucket {
             .as_millis() as u64
     }
 
-    /// try to acquire a token. returns true if allowed, false if rate limited.
+    /// Attempts to acquire a token.
+    ///
+    /// Automatically refills tokens based on elapsed time before checking.
+    ///
+    /// # Returns
+    ///
+    /// - `true` - token acquired, request allowed
+    /// - `false` - no tokens available, request should be rejected
     pub fn try_acquire(&self) -> bool {
         self.refill();
 

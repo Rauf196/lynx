@@ -1,3 +1,23 @@
+//! Load testing tool for the Lynx chat server.
+//!
+//! Spawns many concurrent clients to stress-test connection handling,
+//! message throughput, and resource limits.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # basic: 100 clients, 10 rooms, 10 messages each
+//! cargo run -p lynx-load
+//!
+//! # high load: 10K clients across 100 rooms
+//! cargo run -p lynx-load --release -- -c 10000 -r 100 -m 10
+//!
+//! # custom traffic mix
+//! cargo run -p lynx-load -- --room-msg-pct 85 --dm-pct 5 --list-pct 5 --join-pct 5
+//! ```
+//!
+//! See `--help` for all options.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

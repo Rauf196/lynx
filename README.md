@@ -265,6 +265,16 @@ lynx-server --config /path/to/cfg.toml # Use custom config file
 - Write task: encode responses, send to socket
 - MPSC channel between them (backpressure via `try_send`)
 
+### Design Decisions
+
+| Choice | Why | Trade-off |
+|--------|-----|-----------|
+| **Binary protocol (bincode)** | ~10x faster than JSON, smaller payloads | Not human-readable |
+| **DashMap** | Lock-free reads, sharded writes | Slightly more memory than Mutex<HashMap> |
+| **Task-per-connection** | Concurrent read/write, no head-of-line blocking | More tasks (but Tokio tasks are cheap) |
+| **Bounded channels + try_send** | Prevents slow clients from blocking server | Drops messages to slow clients |
+| **Token bucket rate limiting** | O(1) per request, allows bursts | Per-client memory overhead |
+
 ## Protocol
 
 Length-prefixed binary frames using bincode:
