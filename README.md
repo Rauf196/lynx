@@ -158,7 +158,7 @@ cargo run -p lynx-load --release -- -c 70000 -r 700 -m 10 \
 3. **Single runtime:** All connections share one Tokio async runtime
 4. **Broadcast multiplication:** 1 message to 100-client room = 100 channel sends
 
-Production systems like Discord handle scale through horizontal sharding, message queues (pub/sub), gateway proxies, and distributed architecture. This server demonstrates solid single-process async Rust performance—the foundation that would be replicated across a cluster.
+Production systems like Discord handle scale through horizontal sharding, message queues (pub/sub), gateway proxies, and distributed architecture. This server demonstrates solid single-process async Rust performance - the foundation that would be replicated across a cluster.
 
 **Profiling results:** Server is I/O bound (37% in kernel `sendto`), with no application-level bottlenecks. Tokio runtime overhead is ~1%. See [profiling details](docs/profiling/RESULTS.md).
 
@@ -452,15 +452,6 @@ cargo bench --workspace
 cargo bench -p lynx-protocol -- "encode/"
 cargo bench -p lynx-server -- "broadcast/"
 ```
-
-## Roadmap
-
-- [x] Phase 1: Async foundations, protocol design
-- [x] Phase 2: Core server, room-based chat
-- [x] Phase 3: Metrics, configuration, graceful shutdown
-- [x] Phase 4: Integration tests, load tests, profiling, benchmarking
-- [x] Phase 5: Resource management (connection limits, rate limiting, health endpoints)
-- [x] Phase 6: CI/CD, Docker, Grafana dashboard, CLI args
 
 ## License
 
