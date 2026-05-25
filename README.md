@@ -334,6 +334,32 @@ LYNX_RATE_LIMIT_PER_SECOND=10.0
 LYNX_RATE_LIMIT_BURST=20
 ```
 
+## Docker
+
+Full stack (server + Prometheus + Grafana) via Docker Compose:
+
+```bash
+# Build and start
+docker compose up -d
+
+# Logs
+docker compose logs -f lynx
+
+# Stop
+docker compose down
+```
+
+Exposed ports:
+
+| Port | Service |
+|------|---------|
+| `6006` | Lynx TCP server |
+| `9090` | Lynx metrics + health (`/metrics`, `/health`, `/ready`) |
+| `9091` | Prometheus UI |
+| `3000` | Grafana (anonymous viewer, dashboard preloaded) |
+
+Override env vars in `docker-compose.yml` (e.g. `LYNX_MAXCONNECTIONS`). Compose sets `ulimits.nofile=100000` so the OS tuning section below applies only to host-run benchmarks.
+
 ## Metrics & Health
 
 Prometheus metrics and health endpoints exposed at `http://localhost:9090`:
@@ -413,27 +439,12 @@ watch -n1 'curl -s localhost:9090/metrics | grep lynx_connections_active'
 
 ## Project Structure
 
-```
-lynx/
-├── lynx-server/          # Main server binary
-│   ├── src/
-│   │   ├── main.rs       # Entry point
-│   │   ├── server.rs     # Connection handling
-│   │   ├── config.rs     # Configuration
-│   │   ├── metrics.rs    # Prometheus + health endpoints (axum)
-│   │   └── rate_limiter.rs # Token bucket rate limiter
-│   ├── tests/
-│   │   └── integration.rs # 16 integration tests
-│   ├── benches/
-│   │   └── broadcast.rs  # Broadcast scaling benchmarks
-│   └── examples/
-│       └── chat_client.rs # Interactive CLI client
-├── lynx-protocol/        # Shared protocol library
-│   ├── src/lib.rs        # Message types, encoding
-│   └── benches/
-│       └── protocol.rs   # Encode/decode benchmarks
-└── lynx-load/            # Load testing tool
-    └── src/main.rs       # Configurable load generator
+Workspace has three crates:
+
+```mermaid
+graph LR
+  server[lynx-server<br/>TCP server, metrics, rate limit] --> protocol[lynx-protocol<br/>Wire protocol, shared types]
+  load[lynx-load<br/>Load generator] --> protocol
 ```
 
 ## Testing
